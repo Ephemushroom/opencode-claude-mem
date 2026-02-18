@@ -9,7 +9,7 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "declaration": true,
-    "types": ["node"]
+    "types": ["bun-types"]
   },
   "include": ["src/**/*"]
 }
