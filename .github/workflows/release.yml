@@ -36,6 +36,9 @@ jobs:
           files: |
             dist/index.js
             dist/index.d.ts
-            dist/worker-client.js
-            dist/worker-client.d.ts
           generate_release_notes: true
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

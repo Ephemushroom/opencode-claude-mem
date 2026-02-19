@@ -27,4 +27,3 @@ jobs:
         run: |
           test -f dist/index.js || (echo "dist/index.js missing" && exit 1)
           test -f dist/index.d.ts || (echo "dist/index.d.ts missing" && exit 1)
-          test -f dist/worker-client.js || (echo "dist/worker-client.js missing" && exit 1)

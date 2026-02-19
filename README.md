@@ -15,7 +15,6 @@ This plugin communicates with the Claude-Mem worker service (HTTP API on port 37
 
 ## Prerequisites
 
-- [Bun](https://bun.sh/) runtime installed
 - [Claude Code](https://claude.com/claude-code) with [claude-mem plugin](https://github.com/thedotmack/claude-mem) installed and running
 - [OpenCode](https://opencode.ai) with plugin support
 
@@ -32,16 +31,39 @@ In Claude Code terminal:
 
 Restart Claude Code. The worker service will start automatically on port 37777.
 
-### Step 2: Build the Plugin
+### Step 2: Add the Plugin
+
+Add to your `opencode.json` (project or global `~/.config/opencode/opencode.json`):
+
+```json
+{
+  "plugin": ["@ephemushroom/opencode-claude-mem"]
+}
+```
+
+Restart OpenCode. The plugin will be installed automatically.
+
+### Step 3: Verify
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/opencode-claude-mem.git
+# Check worker is running
+curl -s http://127.0.0.1:37777/api/health
+
+# Restart OpenCode — you should see toast: "Memory active · {project}"
+```
+
+### Alternative: Manual Installation (from source)
+
+If you prefer to install from source instead of npm:
+
+```bash
+git clone https://github.com/Ephemushroom/opencode-claude-mem.git
 cd opencode-claude-mem
 bun install
 bun run build
 ```
 
-### Step 3: Symlink into OpenCode
+Then symlink into OpenCode:
 
 **macOS / Linux:**
 
@@ -52,25 +74,12 @@ ln -sf "$(pwd)/dist/index.js" ~/.config/opencode/plugin/claude-mem.js
 
 **Windows (requires elevated terminal):**
 
-Windows requires administrator privileges to create symbolic links. Use one of:
-
 ```powershell
 # Option A: If you have gsudo / sudo installed
 sudo powershell -Command "New-Item -ItemType SymbolicLink -Path '$env:USERPROFILE\.config\opencode\plugin\claude-mem.js' -Target 'D:\path\to\opencode-claude-mem\dist\index.js'"
 
 # Option B: Run PowerShell as Administrator
 New-Item -ItemType SymbolicLink -Path "$env:USERPROFILE\.config\opencode\plugin\claude-mem.js" -Target "D:\path\to\opencode-claude-mem\dist\index.js"
-```
-
-> **Tip**: Replace `D:\path\to\opencode-claude-mem` with your actual clone path.
-
-### Step 4: Verify
-
-```bash
-# Check worker is running
-curl -s http://127.0.0.1:37777/api/health
-
-# Restart OpenCode — you should see toast: "Memory active · {project}"
 ```
 
 ---
@@ -185,14 +194,16 @@ CHROMA_SYNC connected (remote mode, 127.0.0.1:8000)
 
 ---
 
-## After Editing Source
+## Development
+
+After editing source:
 
 ```bash
 bun run build
 # Restart OpenCode to pick up changes
 ```
 
-The symlink means you don't need to copy files — just rebuild and restart.
+If using symlink install, changes are picked up after rebuild. If using npm install, bump version and republish.
 
 ## Architecture
 
