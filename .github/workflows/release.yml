@@ -38,6 +38,9 @@ jobs:
             dist/index.d.ts
           generate_release_notes: true
 
+      - name: Setup npm auth
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+
       - name: Publish to npm
         run: npm publish --access public
         env:
