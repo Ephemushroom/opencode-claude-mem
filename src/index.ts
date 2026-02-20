@@ -5,11 +5,11 @@ import { WorkerClient } from './worker-client'
  * OpenCode Plugin for Claude-Mem
  *
  * Hooks used:
- * - `event` �?session lifecycle (session.created, session.idle)
- * - `tool.execute.after` �?capture tool observations
- * - `experimental.chat.system.transform` �?inject memory context into system prompt
- * - `chat.message` �?fallback session init when event hook doesn't fire
- * - `tool` �?mem-search custom tool
+ * - `event` — session lifecycle (session.created, session.idle)
+ * - `tool.execute.after` — capture tool observations
+ * - `experimental.chat.system.transform` — inject memory context into system prompt
+ * - `chat.message` — fallback session init when event hook doesn't fire
+ * - `tool` — mem-search custom tool
  *
  * Uses TUI toast notifications for status feedback.
  */
@@ -32,7 +32,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
         body: { title: 'Claude-Mem', message, variant, duration },
       })
     } catch {
-      // TUI not available or API changed �?ignore
+      // TUI not available or API changed — ignore
     }
   }
 
@@ -55,11 +55,25 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     }
   }
 
+  // Context cache — avoids redundant fetches between session.created and system.transform
+  const CONTEXT_CACHE_TTL = 30_000
+  let contextCache: { value: string | null; expiry: number } | null = null
 
-  // Worker health checked lazily �?avoid calling client.tui during plugin init
+  /** Fetch context with 30s TTL cache */
+  async function getCachedContext(): Promise<string | null> {
+    if (contextCache && Date.now() < contextCache.expiry) {
+      return contextCache.value
+    }
+    const context = await WorkerClient.getContext(projectName)
+    contextCache = { value: context, expiry: Date.now() + CONTEXT_CACHE_TTL }
+    return context
+  }
+
+  // Worker health checked lazily — avoid calling client.tui during plugin init
   // (TUI may not be ready yet, causing OpenCode to crash on startup)
   let workerHealthy: boolean | null = null
   let initToastShown = false
+  let contextDisplayedInline = false
 
   /** Lazy worker health check + deferred init toast */
   async function checkWorkerAndToast(): Promise<boolean> {
@@ -69,9 +83,12 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     if (!initToastShown) {
       initToastShown = true
       if (workerHealthy) {
-        await toast(`Memory active · ${projectName}`, 'success')
+        // Skip toast if context will be displayed inline (avoids double notification)
+        if (!contextDisplayedInline) {
+          await toast(`Memory active · ${projectName}`, 'success')
+        }
       } else {
-        await toast('Worker offline �?start Claude Code first', 'warning', 5000)
+        await toast('Worker offline — start Claude Code first', 'warning', 5000)
       }
     }
     return workerHealthy
@@ -82,7 +99,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
 
   /**
    * Helper: ensure a session is initialized with the worker.
-   * Idempotent �?safe to call multiple times for the same session.
+   * Idempotent — safe to call multiple times for the same session.
    * P2: Now accepts an optional prompt parameter (the actual user message).
    */
   async function ensureSessionInit(sessionId: string, prompt?: string): Promise<boolean> {
@@ -131,20 +148,22 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
         if (!sessionId) {
           return
         }
-        // Do NOT call ensureSessionInit �?that would use "SESSION_START" as prompt.
+        // Do NOT call ensureSessionInit — that would use "SESSION_START" as prompt.
         // Let chat.message handle init with the real user prompt.
         currentSessionId = sessionId
+
+        // Pre-fetch context before health toast to suppress redundant toast
+        const context = await getCachedContext()
+        if (context) {
+          contextDisplayedInline = true
+        }
+
         const isHealthy = await checkWorkerAndToast()
         if (isHealthy) {
-          // Fetch context and display inline (like Claude Code SessionStart)
-          try {
-            const context = await WorkerClient.getContext(projectName)
-            if (context) {
-              await sendStatusMessage(sessionId, context)
-            } else {
-              await toast(`Memory active · ${projectName}`, 'success', 2000)
-            }
-          } catch {
+          // Display context inline (like Claude Code SessionStart)
+          if (context) {
+            await sendStatusMessage(sessionId, context)
+          } else {
             await toast(`Memory active · ${projectName}`, 'success', 2000)
           }
         }
@@ -200,7 +219,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
 
     /**
      * Hook: Chat Message
-     * Fallback session initialization �?if event hook doesn't fire session.created,
+     * Fallback session initialization — if event hook doesn't fire session.created,
      * we init the session on the first chat message instead.
      * P2: Extracts the actual user prompt from output.parts and passes it to sessionInit.
      */
@@ -231,7 +250,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       }
 
       try {
-        const context = await WorkerClient.getContext(projectName)
+        const context = await getCachedContext()
         if (context) {
           output.system.push(`[Claude-Mem] Memory Active. Previous Context:\n${context}`)
         }

@@ -140,7 +140,6 @@ Hook handlers available:
 - `event` — session lifecycle (`session.created`, `session.idle`)
 - `chat.message` — session init with real user prompt
 - `experimental.chat.system.transform` — inject memory into system prompt
-- `experimental.chat.messages.transform` — inject visible context block in TUI
 - `tool.execute.after` — capture tool observations
 - `tool` — custom tool definitions (`mem-search`)
 
@@ -149,8 +148,9 @@ Hook handlers available:
 - **Field name**: Worker API uses `contentSessionId` (NOT `claudeSessionId`) — wrong name causes silent failures
 - **Deferred toast**: Never call `client.tui.showToast()` during plugin init — TUI isn't ready, crashes OpenCode
 - **Idempotent init**: `ensureSessionInit()` tracks initialized sessions in a `Set` — safe to call repeatedly
-- **Context caching**: `experimental.chat.messages.transform` caches context with 30s TTL to avoid re-fetching on every render
-- **Synthetic messages**: The messages transform hook prepends a synthetic assistant message with a unique ID (`claude-mem-context-msg`) and checks for it to prevent duplicates
+- **Context caching**: `getCachedContext()` wraps `WorkerClient.getContext()` with a 30s TTL cache (`CONTEXT_CACHE_TTL`) to avoid redundant fetches between `session.created` (display) and `experimental.chat.system.transform` (LLM injection)
+- **Inline context display**: On `session.created`, context is displayed in the chat flow via `sendStatusMessage()` using `client.session.prompt({ noReply: true, parts: [{ ignored: true }] })` — visible to user, not sent to LLM. Falls back to toast if injection fails.
+- **Double notification suppression**: `contextDisplayedInline` flag prevents `checkWorkerAndToast()` from showing a redundant "Memory active" toast when context is already displayed inline
 
 ## Worker API Endpoints
 
