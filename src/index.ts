@@ -5,11 +5,11 @@ import { WorkerClient } from './worker-client'
  * OpenCode Plugin for Claude-Mem
  *
  * Hooks used:
- * - `event` — session lifecycle (session.created, session.idle)
- * - `tool.execute.after` — capture tool observations
- * - `experimental.chat.system.transform` — inject memory context into system prompt
- * - `chat.message` — fallback session init when event hook doesn't fire
- * - `tool` — mem-search custom tool
+ * - `event` �?session lifecycle (session.created, session.idle)
+ * - `tool.execute.after` �?capture tool observations
+ * - `experimental.chat.system.transform` �?inject memory context into system prompt
+ * - `chat.message` �?fallback session init when event hook doesn't fire
+ * - `tool` �?mem-search custom tool
  *
  * Uses TUI toast notifications for status feedback.
  */
@@ -21,7 +21,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     ? project.worktree.split(/[\\/]/).findLast(Boolean) || 'unknown-project'
     : 'unknown-project'
 
-  /** Show a toast notification in the TUI ( the best effort, never throws) */
+  /** Show a toast notification in the TUI (best effort, never throws) */
   async function toast(
     message: string,
     variant: 'info' | 'success' | 'warning' | 'error' = 'info',
@@ -32,11 +32,31 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
         body: { title: 'Claude-Mem', message, variant, duration },
       })
     } catch {
-      // TUI not available or API changed — ignore
+      // TUI not available or API changed �?ignore
     }
   }
 
-  // Worker health checked lazily — avoid calling client.tui during plugin init
+  /**
+   * Send a status message into the chat flow as an ignored user message.
+   * Visible to the user in TUI but not sent to the LLM.
+   * Falls back to toast if session prompt injection fails.
+   */
+  async function sendStatusMessage(sessionId: string, text: string): Promise<void> {
+    try {
+      await client.session.prompt({
+        path: { id: sessionId },
+        body: {
+          noReply: true,
+          parts: [{ type: 'text', text, ignored: true }],
+        },
+      })
+    } catch {
+      await toast(text.slice(0, 200), 'info')
+    }
+  }
+
+
+  // Worker health checked lazily �?avoid calling client.tui during plugin init
   // (TUI may not be ready yet, causing OpenCode to crash on startup)
   let workerHealthy: boolean | null = null
   let initToastShown = false
@@ -51,7 +71,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       if (workerHealthy) {
         await toast(`Memory active · ${projectName}`, 'success')
       } else {
-        await toast('Worker offline — start Claude Code first', 'warning', 5000)
+        await toast('Worker offline �?start Claude Code first', 'warning', 5000)
       }
     }
     return workerHealthy
@@ -62,7 +82,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
 
   /**
    * Helper: ensure a session is initialized with the worker.
-   * Idempotent — safe to call multiple times for the same session.
+   * Idempotent �?safe to call multiple times for the same session.
    * P2: Now accepts an optional prompt parameter (the actual user message).
    */
   async function ensureSessionInit(sessionId: string, prompt?: string): Promise<boolean> {
@@ -111,12 +131,22 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
         if (!sessionId) {
           return
         }
-        // Do NOT call ensureSessionInit — that would use "SESSION_START" as prompt.
+        // Do NOT call ensureSessionInit �?that would use "SESSION_START" as prompt.
         // Let chat.message handle init with the real user prompt.
         currentSessionId = sessionId
         const isHealthy = await checkWorkerAndToast()
         if (isHealthy) {
-          await toast('Session linked to memory', 'info', 2000)
+          // Fetch context and display inline (like Claude Code SessionStart)
+          try {
+            const context = await WorkerClient.getContext(projectName)
+            if (context) {
+              await sendStatusMessage(sessionId, context)
+            } else {
+              await toast(`Memory active · ${projectName}`, 'success', 2000)
+            }
+          } catch {
+            await toast(`Memory active · ${projectName}`, 'success', 2000)
+          }
         }
       }
 
@@ -170,7 +200,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
 
     /**
      * Hook: Chat Message
-     * Fallback session initialization — if event hook doesn't fire session.created,
+     * Fallback session initialization �?if event hook doesn't fire session.created,
      * we init the session on the first chat message instead.
      * P2: Extracts the actual user prompt from output.parts and passes it to sessionInit.
      */
