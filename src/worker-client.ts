@@ -152,21 +152,4 @@ export class WorkerClient {
     }
   }
 
-  /**
-   * Perform Search (used by mem-search tool)
-   */
-  static async search(query: string, project: string): Promise<string> {
-    try {
-      const response = await fetch(
-        `${this.BASE_URL}/api/search?q=${encodeURIComponent(query)}&project=${encodeURIComponent(project)}`
-      )
-      if (!response.ok) {
-        return 'Search failed'
-      }
-      const data = await response.json()
-      return JSON.stringify(data, null, 2)
-    } catch (error) {
-      return `Error performing search: ${error}`
-    }
-  }
 }

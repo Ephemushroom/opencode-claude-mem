@@ -1,4 +1,4 @@
-import { type Plugin, tool } from '@opencode-ai/plugin'
+import { type Plugin } from '@opencode-ai/plugin'
 import { WorkerClient } from './worker-client'
 
 /**
@@ -11,7 +11,6 @@ import { WorkerClient } from './worker-client'
  * - `tool.execute.after` — capture tool observations
  * - `experimental.chat.system.transform` — inject memory context into system prompt
  * - `chat.message` — session init with real user prompt
- * - `tool` — mem-search custom tool
  *
  * Uses TUI toast notifications for status feedback.
  */
@@ -276,7 +275,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       try {
         const context = await getCachedContext()
         if (context) {
-          output.system.push(`[Claude-Mem] Memory Active. Previous Context:\n${context}`)
+          output.system.push(`<claude-mem-context>\n[Claude-Mem] Memory Active. Previous Context:\n${context}\n</claude-mem-context>`)
         }
       } catch {
         // silently fail
@@ -290,6 +289,11 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     'tool.execute.after': async (input, output) => {
       const sessionId = input.sessionID || currentSessionId
       if (!sessionId) {
+        return
+      }
+
+      // Skip claude-mem's own MCP tools to prevent circular memory
+      if (input.tool.startsWith('claude-mem_mcp-search_')) {
         return
       }
 
@@ -309,19 +313,6 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       }
     },
 
-    /**
-     * Custom Tool: Mem-Search
-     */
-    tool: {
-      'mem-search': tool({
-        description:
-          'Search project history and memory. Use this to find information about past decisions, code changes, or bug fixes.',
-        args: {
-          query: tool.schema.string(),
-        },
-        execute: async (args: { query: string }) =>
-          await WorkerClient.search(args.query, projectName),
-      }),
-    },
+
   }
 }
