@@ -8,10 +8,29 @@ Enables OpenCode to share the same memory database as Claude Code — observatio
 
 This plugin communicates with the Claude-Mem worker service (HTTP API on port 37777) to:
 
+- **Inject memory context** — previous session context is injected into the system prompt on every LLM call
 - **Capture tool observations** — every tool execution is recorded as a structured observation
-- **Inject memory context** — previous session context is injected into the system prompt via `/api/context/inject`
 - **Summarize sessions** — when a session goes idle, the last user/assistant messages are sent for summarization
 - **Search memory** — `mem-search` tool lets the LLM query project history
+- **View context on demand** — `/memory` command displays the current memory context in the chat flow
+
+## Differences from Claude Code Version
+
+The Claude Code version of claude-mem uses shell-based hooks where `SessionStart` stdout is automatically injected into the system prompt — one-time, at session start.
+
+This OpenCode version works differently:
+
+| | Claude Code | OpenCode (this plugin) |
+|---|---|---|
+| **Architecture** | Shell commands (`node script.js`) | JavaScript plugin API |
+| **Context injection** | `SessionStart` hook stdout → system prompt (once) | `experimental.chat.system.transform` → system prompt (every LLM call) |
+| **Context freshness** | Snapshot at session start | Refreshed every 60s — new observations during the conversation are picked up |
+| **User-visible context** | Displayed in TUI automatically | `/memory` command to view on demand |
+| **Session init** | `UserPromptSubmit` hook | `chat.message` hook with real user prompt |
+| **Observations** | `PostToolUse` hook | `tool.execute.after` hook |
+| **Summarization** | `Stop` hook | `session.idle` event |
+
+The key advantage of this plugin is **live context refresh** — in long conversations, the LLM always sees the latest observations, not a stale snapshot from session start.
 
 ## Prerequisites
 
@@ -51,6 +70,25 @@ curl -s http://127.0.0.1:37777/api/health
 
 # Restart OpenCode — you should see toast: "Memory active · {project}"
 ```
+
+## Usage
+
+### Automatic (no action needed)
+
+Once installed, the plugin works automatically:
+
+- **System prompt injection** — memory context is injected into every LLM call via `experimental.chat.system.transform`. The LLM sees your project's observation history, past decisions, and session summaries. Context is cached for 60s to avoid redundant worker calls.
+- **Tool observation capture** — every tool execution (file reads, edits, searches, etc.) is recorded as an observation in the memory database.
+- **Session summarization** — when a session goes idle, the last user/assistant exchange is summarized and stored.
+- **Toast notification** — on session start, a "Memory active · {project}" toast confirms the plugin is connected to the worker.
+
+### `/memory` Command
+
+Type `/memory` in the chat to display the current memory context inline. This shows you exactly what the LLM sees in its system prompt — the observation index, token economics, and session history.
+
+### `mem-search` Tool
+
+The LLM can use the `mem-search` tool to search project history and memory. This is available automatically — no action needed.
 
 ### Alternative: Manual Installation (from source)
 
@@ -217,11 +255,12 @@ The plugin is a thin HTTP client. All heavy lifting (LLM processing, storage, se
 
 | Claude Code Hook | OpenCode Hook | Purpose |
 |-----------------|---------------|---------|
-| `SessionStart` → context | `experimental.chat.system.transform` | Inject memory into system prompt |
+| `SessionStart` → context | `experimental.chat.system.transform` | Inject memory into system prompt (every LLM call, 60s cache) |
 | `UserPromptSubmit` → session-init | `chat.message` | Init session with real user prompt |
 | `PostToolUse` → observation | `tool.execute.after` | Capture tool executions |
 | `Stop` → summarize | `event` (session.idle) | Summarize with real message content |
 | `Stop` → session-complete | `event` (session.idle) | Mark session complete |
+| *(no equivalent)* | `config` + `command.execute.before` | `/memory` command for user-visible context |
 
 ### Worker API Endpoints Used
 
@@ -242,6 +281,9 @@ The plugin is a thin HTTP client. All heavy lifting (LLM processing, storage, se
 - **Deferred toast**: `client.tui.showToast()` is deferred to first hook invocation (TUI not ready during plugin init, calling it crashes OpenCode)
 - **Real prompt**: `chat.message` hook extracts actual user input instead of hardcoded "SESSION_START"
 - **Real summarize**: `session.idle` fetches last user/assistant messages via `client.session.messages()` for meaningful summaries
+- **Context caching**: `getCachedContext()` wraps `WorkerClient.getContext()` with a 60s TTL cache to avoid redundant worker calls
+- **Content-type handling**: Worker returns `text/plain` markdown — `getContext()` checks content-type and uses `response.text()` instead of `response.json()`
+- **`/memory` command**: Registered via `config` hook, handled by `command.execute.before` — displays context as an `ignored: true` message (visible to user, not sent to LLM)
 
 ## Troubleshooting
 

@@ -5,10 +5,12 @@ import { WorkerClient } from './worker-client'
  * OpenCode Plugin for Claude-Mem
  *
  * Hooks used:
+ * - `config` — register /memory command
+ * - `command.execute.before` — handle /memory command
  * - `event` — session lifecycle (session.created, session.idle)
  * - `tool.execute.after` — capture tool observations
  * - `experimental.chat.system.transform` — inject memory context into system prompt
- * - `chat.message` — fallback session init when event hook doesn't fire
+ * - `chat.message` — session init with real user prompt
  * - `tool` — mem-search custom tool
  *
  * Uses TUI toast notifications for status feedback.
@@ -55,17 +57,16 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     }
   }
 
-  // Context cache — avoids redundant fetches between session.created and system.transform
-  const CONTEXT_CACHE_TTL = 30_000
-  let contextCache: { value: string | null; expiry: number } | null = null
+  // Session-level context cache — fetched once per session, like Claude Code's SessionStart
+  let contextCache: string | null | undefined = undefined
 
-  /** Fetch context with 30s TTL cache */
+  /** Fetch context once per session (cached after first call) */
   async function getCachedContext(): Promise<string | null> {
-    if (contextCache && Date.now() < contextCache.expiry) {
-      return contextCache.value
+    if (contextCache !== undefined) {
+      return contextCache
     }
     const context = await WorkerClient.getContext(projectName)
-    contextCache = { value: context, expiry: Date.now() + CONTEXT_CACHE_TTL }
+    contextCache = context
     return context
   }
 
@@ -73,7 +74,6 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
   // (TUI may not be ready yet, causing OpenCode to crash on startup)
   let workerHealthy: boolean | null = null
   let initToastShown = false
-  let contextDisplayedInline = false
 
   /** Lazy worker health check + deferred init toast */
   async function checkWorkerAndToast(): Promise<boolean> {
@@ -83,10 +83,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     if (!initToastShown) {
       initToastShown = true
       if (workerHealthy) {
-        // Skip toast if context will be displayed inline (avoids double notification)
-        if (!contextDisplayedInline) {
-          await toast(`Memory active · ${projectName}`, 'success')
-        }
+        await toast(`Memory active · ${projectName}`, 'success')
       } else {
         await toast('Worker offline — start Claude Code first', 'warning', 5000)
       }
@@ -139,6 +136,48 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
 
   return {
     /**
+     * Hook: Config
+     * Register /memory command
+     */
+    config: async (input: any) => {
+      input.command ??= {}
+      input.command['memory'] = {
+        template: '/memory',
+        description: 'Show memory context from Claude-Mem',
+      }
+    },
+
+    /**
+     * Hook: Command Execute Before
+     * Handle /memory command — display context inline
+     */
+    'command.execute.before': async (input: any) => {
+      if (input.command !== 'memory') {
+        return
+      }
+
+      const sessionId = input.sessionID || currentSessionId
+      if (!sessionId) {
+        throw new Error('__MEMORY_NO_SESSION__')
+      }
+
+      const isHealthy = await checkWorkerAndToast()
+      if (!isHealthy) {
+        await sendStatusMessage(sessionId, '⚠ Claude-Mem worker is offline')
+        throw new Error('__MEMORY_HANDLED__')
+      }
+
+      const context = await getCachedContext()
+      if (context) {
+        await sendStatusMessage(sessionId, context)
+      } else {
+        await sendStatusMessage(sessionId, `No memory context available for ${projectName}`)
+      }
+
+      throw new Error('__MEMORY_HANDLED__')
+    },
+
+    /**
      * Hook: Event
      * Handles session.created and session.idle events
      */
@@ -151,22 +190,10 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
         // Do NOT call ensureSessionInit — that would use "SESSION_START" as prompt.
         // Let chat.message handle init with the real user prompt.
         currentSessionId = sessionId
-
-        // Pre-fetch context before health toast to suppress redundant toast
-        const context = await getCachedContext()
-        if (context) {
-          contextDisplayedInline = true
-        }
-
-        const isHealthy = await checkWorkerAndToast()
-        if (isHealthy) {
-          // Display context inline (like Claude Code SessionStart)
-          if (context) {
-            await sendStatusMessage(sessionId, context)
-          } else {
-            await toast(`Memory active · ${projectName}`, 'success', 2000)
-          }
-        }
+        // Invalidate context cache so new session fetches fresh context
+        // (includes summaries from previous sessions)
+        contextCache = undefined
+        await checkWorkerAndToast()
       }
 
       if (event.type === 'session.idle') {
@@ -219,14 +246,11 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
 
     /**
      * Hook: Chat Message
-     * Fallback session initialization — if event hook doesn't fire session.created,
-     * we init the session on the first chat message instead.
-     * P2: Extracts the actual user prompt from output.parts and passes it to sessionInit.
+     * Session initialization with real user prompt.
      */
     'chat.message': async (input, output) => {
       const sessionId = input.sessionID
       if (sessionId) {
-        // P2: Extract user prompt text from the message parts
         const userPrompt = extractTextFromParts(output.parts)
         await ensureSessionInit(sessionId, userPrompt || undefined)
       }

@@ -132,15 +132,21 @@ export class WorkerClient {
       if (!response.ok) {
         return null
       }
-      const data: any = await response.json()
-      if (typeof data === 'string') {
-        return data
+      const contentType = response.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        const data: any = await response.json()
+        if (typeof data === 'string') {
+          return data
+        }
+        if (data && typeof data.content === 'string') {
+          return data.content
+        }
+        const text = JSON.stringify(data, null, 2)
+        return text === '{}' || text === 'null' ? null : text
       }
-      if (data && typeof data.content === 'string') {
-        return data.content
-      }
-      const text = JSON.stringify(data, null, 2)
-      return text === '{}' || text === 'null' ? null : text
+      // Worker returns text/plain markdown
+      const text = await response.text()
+      return text.trim() || null
     } catch {
       return null
     }
