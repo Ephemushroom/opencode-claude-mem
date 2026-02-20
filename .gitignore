@@ -4,3 +4,4 @@ dist/
 package-lock.json
 .idea/
 nul
+.sisyphus/
