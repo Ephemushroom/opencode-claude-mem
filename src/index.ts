@@ -1,4 +1,4 @@
-import { type Plugin } from '@opencode-ai/plugin'
+import { type Plugin, type PluginModule } from '@opencode-ai/plugin'
 import { WorkerClient } from './worker-client'
 
 /**
@@ -275,7 +275,9 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       try {
         const context = await getCachedContext()
         if (context) {
-          output.system.push(`<claude-mem-context>\n[Claude-Mem] Memory Active. Previous Context:\n${context}\n</claude-mem-context>`)
+          output.system.push(
+            `<claude-mem-context>\n[Claude-Mem] Memory Active. Previous Context:\n${context}\n</claude-mem-context>`
+          )
         }
       } catch {
         // silently fail
@@ -312,7 +314,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
         // Silently fail - don't block tool execution
       }
     },
-
-
   }
 }
+
+export default { server: ClaudeMemPlugin } satisfies PluginModule

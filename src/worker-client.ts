@@ -151,5 +151,4 @@ export class WorkerClient {
       return null
     }
   }
-
 }
