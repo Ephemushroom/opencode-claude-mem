@@ -8,11 +8,10 @@ Enables OpenCode to share the same memory database as Claude Code — observatio
 
 This plugin communicates with the Claude-Mem worker service (HTTP API on port 37777) to:
 
-- **Inject memory context** — previous session context is injected into the system prompt on every LLM call
+- **Inject memory context** — previous session context is automatically injected into the system prompt on every LLM call
 - **Capture tool observations** — every tool execution is recorded as a structured observation
 - **Summarize sessions** — when a session goes idle, the last user/assistant messages are sent for summarization
 - **Search memory** — memory search is available via claude-mem's MCP server
-- **View context on demand** — `/memory` command displays the current memory context in the chat flow
 
 ## Differences from Claude Code Version
 
@@ -25,7 +24,6 @@ This OpenCode version works differently:
 | **Architecture** | Shell commands (`node script.js`) | JavaScript plugin API |
 | **Context injection** | `SessionStart` hook stdout → system prompt (once) | `experimental.chat.system.transform` → system prompt (every LLM call, session-level cache) |
 | **Context freshness** | Snapshot at session start | Cached once per session (same as Claude Code) |
-| **User-visible context** | Displayed in TUI automatically | `/memory` command to view on demand |
 | **Session init** | `UserPromptSubmit` hook | `chat.message` hook with real user prompt |
 | **Observations** | `PostToolUse` hook | `tool.execute.after` hook (with circular memory protection) |
 | **Summarization** | `Stop` hook | `session.idle` event |
@@ -78,14 +76,12 @@ curl -s http://127.0.0.1:37777/api/health
 
 Once installed, the plugin works automatically:
 
-- **System prompt injection** — memory context is injected into every LLM call via `experimental.chat.system.transform`. The LLM sees your project's observation history, past decisions, and session summaries. Context is cached once per session to avoid redundant worker calls.
+- **System prompt injection** — memory context is automatically injected into every LLM call via `experimental.chat.system.transform`. The LLM sees your project's observation history, past decisions, and session summaries. Context is cached once per session to avoid redundant worker calls.
 - **Tool observation capture** — every tool execution (file reads, edits, searches, etc.) is recorded as an observation in the memory database. Claude-mem's own MCP tools are automatically filtered to prevent circular memory.
 - **Session summarization** — when a session goes idle, the last user/assistant exchange is summarized and stored.
 - **Toast notification** — on session start, a "Memory active · {project}" toast confirms the plugin is connected to the worker.
 
-### `/memory` Command
-
-Type `/memory` in the chat to display the current memory context inline. This shows you exactly what the LLM sees in its system prompt — the observation index, token economics, and session history.
+**Note**: Memory context is injected transparently into every conversation. You don't need to run any commands — the plugin works automatically in the background.
 
 ### Memory Search
 

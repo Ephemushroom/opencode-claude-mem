@@ -5,14 +5,13 @@ import { WorkerClient } from './worker-client'
  * OpenCode Plugin for Claude-Mem
  *
  * Hooks used:
- * - `config` — register /memory command
- * - `command.execute.before` — handle /memory command
  * - `event` — session lifecycle (session.created, session.idle)
  * - `tool.execute.after` — capture tool observations
  * - `experimental.chat.system.transform` — inject memory context into system prompt
  * - `chat.message` — session init with real user prompt
  *
- * Uses TUI toast notifications for status feedback.
+ * Memory context is automatically injected into every conversation via system prompt.
+ * No manual commands needed - the plugin works transparently in the background.
  */
 export const ClaudeMemPlugin: Plugin = async (ctx) => {
   const { project, directory, client } = ctx
@@ -34,25 +33,6 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       })
     } catch {
       // TUI not available or API changed — ignore
-    }
-  }
-
-  /**
-   * Send a status message into the chat flow as an ignored user message.
-   * Visible to the user in TUI but not sent to the LLM.
-   * Falls back to toast if session prompt injection fails.
-   */
-  async function sendStatusMessage(sessionId: string, text: string): Promise<void> {
-    try {
-      await client.session.prompt({
-        path: { id: sessionId },
-        body: {
-          noReply: true,
-          parts: [{ type: 'text', text, ignored: true }],
-        },
-      })
-    } catch {
-      await toast(text.slice(0, 200), 'info')
     }
   }
 
@@ -134,48 +114,6 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
   }
 
   return {
-    /**
-     * Hook: Config
-     * Register /memory command
-     */
-    config: async (input: any) => {
-      input.command ??= {}
-      input.command['memory'] = {
-        template: '/memory',
-        description: 'Show memory context from Claude-Mem',
-      }
-    },
-
-    /**
-     * Hook: Command Execute Before
-     * Handle /memory command — display context inline
-     */
-    'command.execute.before': async (input: any) => {
-      if (input.command !== 'memory') {
-        return
-      }
-
-      const sessionId = input.sessionID || currentSessionId
-      if (!sessionId) {
-        throw new Error('__MEMORY_NO_SESSION__')
-      }
-
-      const isHealthy = await checkWorkerAndToast()
-      if (!isHealthy) {
-        await sendStatusMessage(sessionId, '⚠ Claude-Mem worker is offline')
-        throw new Error('__MEMORY_HANDLED__')
-      }
-
-      const context = await getCachedContext()
-      if (context) {
-        await sendStatusMessage(sessionId, context)
-      } else {
-        await sendStatusMessage(sessionId, `No memory context available for ${projectName}`)
-      }
-
-      throw new Error('__MEMORY_HANDLED__')
-    },
-
     /**
      * Hook: Event
      * Handles session.created and session.idle events
