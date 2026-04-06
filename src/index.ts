@@ -1,6 +1,114 @@
 import { type Plugin, type PluginModule } from '@opencode-ai/plugin'
 import { WorkerClient } from './worker-client'
 
+const MAX_OBSERVATION_BYTES = 24 * 1024
+const MAX_TAG_REPLACEMENTS = 100
+const META_TOOLS = new Set([
+  'askuserquestion',
+  'getmcpresource',
+  'listmcpresourcestool',
+  'listmcptools',
+  'skill',
+  'slashcommand',
+  'todowrite',
+])
+const PRIVATE_TAG_REGEX = /<private>[\s\S]*?<\/private>/g
+const CONTEXT_TAG_REGEX = /<claude-mem-context>[\s\S]*?<\/claude-mem-context>/g
+
+function stripTaggedContent(text: string): string {
+  if (!text) {
+    return text
+  }
+
+  let result = text
+  let replacements = 0
+
+  while (replacements < MAX_TAG_REPLACEMENTS && PRIVATE_TAG_REGEX.test(result)) {
+    PRIVATE_TAG_REGEX.lastIndex = 0
+    result = result.replace(PRIVATE_TAG_REGEX, '')
+    replacements++
+  }
+  PRIVATE_TAG_REGEX.lastIndex = 0
+
+  while (replacements < MAX_TAG_REPLACEMENTS && CONTEXT_TAG_REGEX.test(result)) {
+    CONTEXT_TAG_REGEX.lastIndex = 0
+    result = result.replace(CONTEXT_TAG_REGEX, '')
+    replacements++
+  }
+  CONTEXT_TAG_REGEX.lastIndex = 0
+
+  return result.trim()
+}
+
+function sanitizeObservationValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return stripTaggedContent(value)
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeObservationValue(item))
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, sanitizeObservationValue(item)])
+    )
+  }
+
+  return value
+}
+
+function truncateUtf8Bytes(text: string, maxBytes: number): string {
+  const encoder = new TextEncoder()
+  if (encoder.encode(text).length <= maxBytes) {
+    return text
+  }
+
+  const suffix = '\n[truncated]'
+  const suffixBytes = encoder.encode(suffix).length
+  const budget = Math.max(maxBytes - suffixBytes, 0)
+
+  let low = 0
+  let high = text.length
+
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2)
+    const candidate = text.slice(0, mid)
+    if (encoder.encode(candidate).length <= budget) {
+      low = mid
+    } else {
+      high = mid - 1
+    }
+  }
+
+  return `${text.slice(0, low)}${suffix}`
+}
+
+function shouldSkipObservationTool(toolName: string): boolean {
+  if (!toolName) {
+    return true
+  }
+
+  const normalizedName = toolName.toLowerCase()
+  return normalizedName.startsWith('claude-mem_mcp-search_') || META_TOOLS.has(normalizedName)
+}
+
+function normalizeToolOutput(output: unknown): string {
+  if (typeof output === 'string') {
+    return output
+  }
+
+  if (output === undefined || output === null) {
+    return ''
+  }
+
+  try {
+    return JSON.stringify(output)
+  } catch {
+    return String(output)
+  }
+}
+
 /**
  * OpenCode Plugin for Claude-Mem
  *
@@ -223,6 +331,33 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     },
 
     /**
+     * Hook: Preserve memory context during compaction
+     */
+    'experimental.session.compacting': async (input, output) => {
+      const sessionId = (input as any).sessionID
+
+      if (sessionId) {
+        await ensureSessionInit(sessionId)
+      }
+
+      const isHealthy = await checkWorkerAndToast()
+      if (!isHealthy) {
+        return
+      }
+
+      try {
+        const context = await getCachedContext()
+        if (context) {
+          output.context.push(
+            `<claude-mem-context>\n[Claude-Mem] Memory Active. Previous Context:\n${context}\n</claude-mem-context>`
+          )
+        }
+      } catch {
+        // silently fail
+      }
+    },
+
+    /**
      * Hook: Tool Execution After
      * Captures tool observations. SDK provides args directly in input.
      */
@@ -232,8 +367,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
         return
       }
 
-      // Skip claude-mem's own MCP tools to prevent circular memory
-      if (input.tool.startsWith('claude-mem_mcp-search_')) {
+      if (shouldSkipObservationTool(input.tool)) {
         return
       }
 
@@ -241,11 +375,17 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       await ensureSessionInit(sessionId)
 
       try {
+        const sanitizedToolInput = sanitizeObservationValue(input.args || {})
+        const sanitizedToolOutput = truncateUtf8Bytes(
+          stripTaggedContent(normalizeToolOutput(output.output)),
+          MAX_OBSERVATION_BYTES
+        )
+
         await WorkerClient.sendObservation(
           sessionId,
           input.tool,
-          input.args || {},
-          output.output,
+          sanitizedToolInput,
+          sanitizedToolOutput,
           projectRoot
         )
       } catch {
