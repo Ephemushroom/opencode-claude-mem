@@ -1,57 +1,20 @@
 # opencode-claude-mem
 
-OpenCode plugin for [Claude-Mem](https://github.com/thedotmack/claude-mem) persistent memory system.
+Persistent memory for [OpenCode](https://opencode.ai), powered by
+[Claude-Mem](https://github.com/thedotmack/claude-mem).
 
-Enables OpenCode to share the same memory database as Claude Code — observations, summaries, and context injection all work across both editors.
+Share the same Claude-Mem worker, database, and search tools between Claude Code
+and OpenCode. Once connected, previous observations and summaries are injected
+into new OpenCode sessions automatically.
 
-## How It Works
+> **Note:** This plugin is a thin OpenCode adapter for an existing Claude-Mem
+> installation. It does **not** install Claude-Mem, manage slash commands, or
+> start the worker for you.
 
-This plugin communicates with the Claude-Mem worker service (HTTP API on port 37777) to:
+## Quick Start
 
-- **Inject memory context** — previous session context is automatically injected into the system prompt on every LLM call
-- **Capture tool observations** — every tool execution is recorded as a structured observation
-- **Summarize sessions** — when a session goes idle, the last user/assistant messages are sent for summarization
-- **Search memory** — memory search is available via claude-mem's MCP server
-
-## Differences from Claude Code Version
-
-The Claude Code version of claude-mem uses shell-based hooks where `SessionStart` stdout is automatically injected into the system prompt — one-time, at session start.
-
-This OpenCode version works differently:
-
-| | Claude Code | OpenCode (this plugin) |
-|---|---|---|
-| **Architecture** | Shell commands (`node script.js`) | JavaScript plugin API |
-| **Context injection** | `SessionStart` hook stdout → system prompt (once) | `experimental.chat.system.transform` → system prompt (every LLM call, session-level cache) |
-| **Context freshness** | Snapshot at session start | Cached once per session (same as Claude Code) |
-| **Session init** | `UserPromptSubmit` hook | `chat.message` hook with real user prompt |
-| **Observations** | `PostToolUse` hook | `tool.execute.after` hook (with circular memory protection) |
-| **Summarization** | `Stop` hook | `session.idle` event |
-| **Memory search** | MCP server | MCP server (same — no custom tool needed) |
-
-Both versions behave the same way: context is fetched once per session and cached. The OpenCode plugin uses `experimental.chat.system.transform` which fires on every LLM call, but the context is session-level cached so the worker is only called once.
-
-## Prerequisites
-
-- [Claude Code](https://claude.com/claude-code) with [claude-mem plugin](https://github.com/thedotmack/claude-mem) installed and running
-- [OpenCode](https://opencode.ai) with plugin support
-
-## Installation
-
-### Step 1: Install Claude-Mem (if not already)
-
-In Claude Code terminal:
-
-```
-/plugin marketplace add thedotmack/claude-mem
-/plugin install claude-mem
-```
-
-Restart Claude Code. The worker service will start automatically on port 37777.
-
-### Step 2: Add the Plugin
-
-Add to your `opencode.json` (project or global `~/.config/opencode/opencode.json`):
+1. Install and configure Claude-Mem in Claude Code.
+2. Add this plugin to your `opencode.json`:
 
 ```json
 {
@@ -59,241 +22,224 @@ Add to your `opencode.json` (project or global `~/.config/opencode/opencode.json
 }
 ```
 
-Restart OpenCode. The plugin will be installed automatically.
+3. Restart OpenCode.
+4. Start a session — memory context will be injected automatically when the
+   Claude-Mem worker is available.
 
-### Step 3: Verify
+## Key Features
 
-```bash
-# Check worker is running
-curl -s http://127.0.0.1:37777/api/health
+- **Shared Memory** — Uses the same Claude-Mem worker and memory store as
+  Claude Code.
+- **Automatic Context Injection** — Injects relevant project memory into the
+  system prompt for new OpenCode turns.
+- **Compaction Support** — Re-injects memory context during OpenCode session
+  compaction so long conversations keep their historical context.
+- **Observation Capture** — Sends tool observations to Claude-Mem for future
+  retrieval and summarization.
+- **Observation Hardening** — Skips low-value meta tools, strips
+  `<claude-mem-context>` and `<private>` tags before storage, and truncates
+  oversized observation payloads by UTF-8 byte size.
+- **Graceful Degradation** — If the worker is offline, the plugin fails open
+  and OpenCode continues to work normally.
 
-# Restart OpenCode — you should see toast: "Memory active · {project}"
-```
-
-## Usage
-
-### Automatic (no action needed)
-
-Once installed, the plugin works automatically:
-
-- **System prompt injection** — memory context is automatically injected into every LLM call via `experimental.chat.system.transform`. The LLM sees your project's observation history, past decisions, and session summaries. Context is cached once per session to avoid redundant worker calls.
-- **Tool observation capture** — every tool execution (file reads, edits, searches, etc.) is recorded as an observation in the memory database. Claude-mem's own MCP tools are automatically filtered to prevent circular memory.
-- **Session summarization** — when a session goes idle, the last user/assistant exchange is summarized and stored.
-- **Toast notification** — on session start, a "Memory active · {project}" toast confirms the plugin is connected to the worker.
-
-**Note**: Memory context is injected transparently into every conversation. You don't need to run any commands — the plugin works automatically in the background.
-
-### Memory Search
-
-Memory search is provided by claude-mem's MCP server. If you have the claude-mem MCP configured in OpenCode, the LLM can search project history directly via MCP tools — no plugin-level tool needed.
-
-### Alternative: Manual Installation (from source)
-
-If you prefer to install from source instead of npm:
-
-```bash
-git clone https://github.com/Ephemushroom/opencode-claude-mem.git
-cd opencode-claude-mem
-bun install
-bun run build
-```
-
-Then symlink into OpenCode:
-
-**macOS / Linux:**
-
-```bash
-mkdir -p ~/.config/opencode/plugin
-ln -sf "$(pwd)/dist/index.js" ~/.config/opencode/plugin/claude-mem.js
-```
-
-**Windows (requires elevated terminal):**
-
-```powershell
-# Option A: If you have gsudo / sudo installed
-sudo powershell -Command "New-Item -ItemType SymbolicLink -Path '$env:USERPROFILE\.config\opencode\plugin\claude-mem.js' -Target 'D:\path\to\opencode-claude-mem\dist\index.js'"
-
-# Option B: Run PowerShell as Administrator
-New-Item -ItemType SymbolicLink -Path "$env:USERPROFILE\.config\opencode\plugin\claude-mem.js" -Target "D:\path\to\opencode-claude-mem\dist\index.js"
-```
-
----
-
-## Windows-Specific Setup
-
-### Python Version for ChromaDB
-
-Claude-Mem uses ChromaDB for vector semantic search. ChromaDB's `chroma-mcp` tool requires **Python ≤ 3.13** (Pydantic V1 is incompatible with Python 3.14+).
-
-If `uv` defaults to Python 3.14, you'll see:
+## How It Works
 
 ```
-Chroma connection failed: Chroma server not reachable.
+OpenCode session
+    |
+    |-- plugin loads
+    |   '-- connect to Claude-Mem worker on port 37777
+    |
+    |-- session.created ................ track session + reset cache
+    |-- chat.message ................... init session with real user prompt
+    |-- tool.execute.after ............. send tool observation
+    |-- system.transform ............... inject memory into system prompt
+    |-- session.compacting ............. preserve memory during compaction
+    '-- session.idle ................... summarize + complete session
 ```
 
-**Fix — set global Python version:**
-
-```bash
-uv python pin --global 3.13
-```
-
-This creates a global `.python-version` file in `%APPDATA%\uv\` so all `uvx` calls default to 3.13.
-
-### ChromaDB on Windows x64
-
-The npm `chromadb` package only supports Windows ARM64, not x64. The worker will fail to start Chroma natively.
-
-**Fix — use Python ChromaDB instead:**
-
-```bash
-# Install Python ChromaDB CLI
-uv tool install chromadb --python 3.13
-```
-
-Update `~/.claude-mem/settings.json`:
-
-```json
-{
-  "CLAUDE_MEM_CHROMA_MODE": "remote"
-}
-```
-
-Start Chroma server manually:
-
-```bash
-chroma run --path %USERPROFILE%\.claude-mem\vector-db --host 127.0.0.1 --port 8000
-```
-
-> **Note**: Chroma server must be running before Claude Code starts. Consider creating a startup script or scheduled task.
-
-### ChromaDB Embedding Model Crash (Bun Runtime)
-
-After connecting to Chroma, the worker may crash with:
-
-```
-Collection setup failed: undefined is not an object
-  (evaluating 'e.cacheDir = ...')
-```
-
-This happens because `@huggingface/transformers` returns `undefined` when imported through Bun's CJS shim.
-
-**Fix — patch `worker-service.cjs`:**
-
-Locate the bundled worker file:
-
-```
-~/.claude/plugins/cache/thedotmack/claude-mem/<version>/scripts/worker-service.cjs
-```
-
-Find this pattern (minified):
-
-```javascript
-let{env:e}=await Promise.resolve().then(()=>(F9(),N9));
-```
-
-Replace with:
-
-```javascript
-let{env:e}=await import("@huggingface/transformers");
-```
-
-Then install the dependency:
-
-```bash
-cd ~/.claude/plugins/cache/thedotmack/claude-mem/<version>
-bun install
-```
-
-> ⚠️ **This patch is lost on plugin updates.** You'll need to re-apply after each claude-mem version upgrade.
-
-### Verifying ChromaDB Works
-
-```bash
-# Check Chroma server
-curl -s http://127.0.0.1:8000/api/v1/heartbeat
-
-# Check worker health
-curl -s http://127.0.0.1:37777/api/health
-
-# Check for sync errors in worker logs
-# Open http://localhost:37777 in browser for the web viewer
-```
-
-When working correctly, worker logs should show:
-
-```
-CHROMA_SYNC connected (remote mode, 127.0.0.1:8000)
-```
-
-> **ChromaDB is optional.** Without it, claude-mem falls back to SQLite FTS5 full-text search. You lose semantic/vector search but keyword search still works.
-
----
-
-## Development
-
-After editing source:
-
-```bash
-bun run build
-# Restart OpenCode to pick up changes
-```
-
-If using symlink install, changes are picked up after rebuild. If using npm install, bump version and republish.
+The plugin is intentionally small. It only adapts OpenCode hook events to the
+Claude-Mem worker HTTP API. All indexing, summarization, memory search, and
+storage stay in upstream Claude-Mem.
 
 ## Architecture
 
 ```
-OpenCode ←→ Plugin (this repo) ←→ Claude-Mem Worker (port 37777) ←→ SQLite + ChromaDB
+OpenCode <-> Plugin (this repo) <-> Claude-Mem Worker (port 37777) <-> SQLite + ChromaDB
 ```
 
-The plugin is a thin HTTP client. All heavy lifting (LLM processing, storage, search) happens in the worker.
+### Hook Mapping
 
-### Hook Mapping (Claude Code → OpenCode)
-
-| Claude Code Hook | OpenCode Hook | Purpose |
-|-----------------|---------------|---------|
-| `SessionStart` → context | `experimental.chat.system.transform` | Inject memory into system prompt (every LLM call, session-level cache) |
-| `UserPromptSubmit` → session-init | `chat.message` | Init session with real user prompt |
-| `PostToolUse` → observation | `tool.execute.after` | Capture tool executions |
-| `Stop` → summarize | `event` (session.idle) | Summarize with real message content |
-| `Stop` → session-complete | `event` (session.idle) | Mark session complete |
-| *(no equivalent)* | `config` + `command.execute.before` | `/memory` command for user-visible context |
+| Claude Code | OpenCode plugin | Purpose |
+|---|---|---|
+| `SessionStart` | `experimental.chat.system.transform` | Inject memory context |
+| `SessionStart` | `experimental.session.compacting` | Preserve memory during compaction |
+| `UserPromptSubmit` | `chat.message` | Initialize session with real user prompt |
+| `PostToolUse` | `tool.execute.after` | Capture tool observations |
+| `Stop` | `event` (`session.idle`) | Summarize the session |
+| `SessionEnd` | `event` (`session.idle`) | Mark session complete |
 
 ### Worker API Endpoints Used
 
 | Method | Endpoint | Purpose |
-|--------|----------|---------|
+|---|---|---|
 | `GET` | `/api/health` | Health check |
-| `GET` | `/api/context/inject?project={name}` | Get formatted context for system prompt |
+| `GET` | `/api/context/inject?project={name}` | Fetch formatted memory context |
 | `POST` | `/api/sessions/init` | Initialize session |
-| `POST` | `/api/sessions/observations` | Send tool observation |
+| `POST` | `/api/sessions/observations` | Store tool observation |
 | `POST` | `/api/sessions/summarize` | Trigger summarization |
 | `POST` | `/api/sessions/complete` | Complete session |
 
+## Installation
+
+### Prerequisites
+
+- [Claude Code](https://claude.com/claude-code) with
+  [Claude-Mem](https://github.com/thedotmack/claude-mem) installed
+- [OpenCode](https://opencode.ai) with plugin support
+- A running Claude-Mem worker on port `37777` (default)
+
+### Step 1: Install Claude-Mem
+
+In Claude Code:
+
+```text
+/plugin marketplace add thedotmack/claude-mem
+/plugin install claude-mem
+```
+
+Restart Claude Code so the worker can start and initialize its data directory.
+
+### Step 2: Add the OpenCode Plugin
+
+Add this plugin to your project or global `opencode.json`:
+
+```json
+{
+  "plugin": ["@ephemushroom/opencode-claude-mem"]
+}
+```
+
+Then restart OpenCode.
+
+### Step 3: Verify
+
+```bash
+curl -s http://127.0.0.1:37777/api/health
+```
+
+If the worker is healthy, OpenCode should show a toast like
+`Memory active · <project>` when a session starts.
+
+## Usage
+
+Once installed, the plugin works automatically:
+
+- **Context injection** — Memory is injected into the system prompt on each LLM
+  call, with session-level caching to avoid repeated worker requests.
+- **Compaction preservation** — The same cached memory context is pushed into
+  OpenCode’s compaction path so memory survives conversation compression.
+- **Tool observation capture** — Tool executions are stored as observations,
+  except for low-value/meta tools and Claude-Mem search tools.
+- **Session summarization** — On `session.idle`, the plugin fetches the latest
+  user and assistant messages and asks Claude-Mem to summarize them.
+
+## Memory Search
+
+Memory search is provided by Claude-Mem’s MCP server, not by this plugin.
+
+If your OpenCode environment already has Claude-Mem MCP tools configured, the
+assistant can query project memory directly with Claude-Mem’s search workflow:
+
+1. `search(query="...")`
+2. `timeline(anchor=ID)`
+3. `get_observations(ids=[...])`
+
+This plugin focuses on sending memory data to the worker and injecting returned
+context back into OpenCode sessions.
+
 ## Key Implementation Details
 
-- **Field name**: All worker API calls use `contentSessionId` (not `claudeSessionId`) — using the wrong field name causes silent failures
-- **No console output**: All `console.log/warn/error` removed to avoid corrupting OpenCode TUI
-- **Deferred toast**: `client.tui.showToast()` is deferred to first hook invocation (TUI not ready during plugin init, calling it crashes OpenCode)
-- **Real prompt**: `chat.message` hook extracts actual user input instead of hardcoded "SESSION_START"
-- **Real summarize**: `session.idle` fetches last user/assistant messages via `client.session.messages()` for meaningful summaries
-- **Context caching**: `getCachedContext()` caches context once per session (invalidated on `session.created`) to avoid redundant worker calls
-- **Content-type handling**: Worker returns `text/plain` markdown — `getContext()` checks content-type and uses `response.text()` instead of `response.json()`
-- **Context tag wrapping**: Injected context is wrapped in `<claude-mem-context>` tags so the worker's tag-stripping logic can remove it from observations, preventing circular memory
-- **Circular memory protection**: `tool.execute.after` filters out claude-mem's own MCP tools (`claude-mem_mcp-search_*`) to prevent search results from being re-recorded as observations
-- **`/memory` command**: Registered via `config` hook, handled by `command.execute.before` — displays context as an `ignored: true` message (visible to user, not sent to LLM)
+- **Thin client architecture** — `src/index.ts` handles OpenCode hooks and
+  session state; `src/worker-client.ts` is a static HTTP client.
+- **No console logging** — The plugin never writes to `console.*` because that
+  can corrupt the OpenCode TUI.
+- **Deferred toast** — Health toasts only happen after hook execution begins,
+  avoiding startup crashes caused by early TUI access.
+- **Real prompt initialization** — `chat.message` sends the actual user prompt
+  to Claude-Mem instead of a synthetic placeholder.
+- **Real summarize payloads** — On `session.idle`, the plugin reads the latest
+  session messages and sends the last user and assistant messages for summary.
+- **Context caching** — Memory context is fetched once per session and reused
+  across prompt injection and compaction.
+- **Circular memory protection** — Injected context is wrapped in
+  `<claude-mem-context>` tags, Claude-Mem MCP search tools are skipped, and
+  memory-related tags are stripped before storing observations.
+- **UTF-8 truncation** — Large observation outputs are capped by byte size to
+  reduce token waste and avoid oversize worker payloads.
+- **Field name correctness** — Worker payloads use `contentSessionId`, not
+  `claudeSessionId`.
+
+## Differences from `bloodf/opencode-mem`
+
+This project intentionally stays smaller in scope.
+
+- **This plugin does**: bridge OpenCode hooks to an already-installed
+  Claude-Mem worker.
+- **This plugin does not**: auto-install Claude-Mem, auto-edit OpenCode config,
+  auto-copy skills, auto-register slash commands, or auto-start the worker.
+
+That keeps the runtime behavior predictable and leaves worker ownership with the
+upstream Claude-Mem installation.
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| No toast on startup | Worker not running | Start Claude Code first, or check `curl http://127.0.0.1:37777/api/health` |
-| "Worker offline" toast | Worker crashed or not started | Restart Claude Code |
-| OpenCode crashes on startup | Plugin calling TUI too early | Update to latest version (deferred toast fix) |
-| TUI display corrupted | console.log in plugin code | Ensure no console output in source |
-| "SESSION_START" in prompts | Old version bug | Update — `session.created` no longer calls sessionInit |
-| Chroma sync failed | Python version or Chroma not running | See [Windows-Specific Setup](#windows-specific-setup) |
-| Observations not saved | Wrong field name | Ensure `contentSessionId` (not `claudeSessionId`) |
+### No memory appears in OpenCode
+
+- Confirm the worker is running:
+
+```bash
+curl -s http://127.0.0.1:37777/api/health
+```
+
+- Make sure Claude-Mem has already been installed and used from Claude Code.
+- Start a fresh OpenCode session after the worker is healthy.
+
+### OpenCode shows `Worker offline`
+
+- Restart Claude Code to bring Claude-Mem back up.
+- Verify the worker port is still `37777`.
+
+### OpenCode crashes on startup
+
+- Update to a version with deferred TUI access.
+- Ensure there are no `console.log`, `console.warn`, or `console.error` calls in
+  local plugin modifications.
+
+### Observations are missing or incomplete
+
+- Ensure the worker API payload uses `contentSessionId`.
+- Be aware that low-value meta tools and Claude-Mem search tools are skipped by
+  design.
+- Very large tool outputs are truncated before storage.
+
+### Memory search is unavailable
+
+- This plugin does not configure MCP tools for you.
+- Configure Claude-Mem’s MCP server separately in your OpenCode environment if
+  you want in-editor memory search.
+
+## Development
+
+```bash
+bun install
+bun run build
+bun run lint
+bun run fmt:check
+```
+
+If you edit source code locally, rebuild and restart OpenCode to pick up the new
+plugin bundle.
 
 ## License
 
