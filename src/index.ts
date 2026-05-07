@@ -3,6 +3,7 @@ import { WorkerClient } from './worker-client'
 
 const MAX_OBSERVATION_BYTES = 24 * 1024
 const MAX_TAG_REPLACEMENTS = 100
+const ASSISTANT_FLUSH_DEBOUNCE_MS = 250
 const META_TOOLS = new Set([
   'askuserquestion',
   'getmcpresource',
@@ -110,12 +111,32 @@ function normalizeToolOutput(output: unknown): string {
 }
 
 /**
+ * Extract text content from message parts.
+ * Parts can be TextPart, ToolCallPart, etc. We only want text.
+ * Skips synthetic/ignored parts to match what is shown to the user.
+ */
+function extractTextFromParts(parts: any[]): string {
+  if (!parts || !Array.isArray(parts)) {
+    return ''
+  }
+  return parts
+    .filter(
+      (p: any) => p && p.type === 'text' && typeof p.text === 'string' && !p.synthetic && !p.ignored
+    )
+    .map((p: any) => p.text)
+    .join('\n')
+    .trim()
+}
+
+/**
  * OpenCode Plugin for Claude-Mem
  *
  * Hooks used:
- * - `event` — session lifecycle (session.created, session.idle)
+ * - `event` — session lifecycle (session.created, session.idle, session.compacted,
+ *             session.deleted, message.updated, file.edited)
  * - `tool.execute.after` — capture tool observations
  * - `experimental.chat.system.transform` — inject memory context into system prompt
+ * - `experimental.session.compacting` — preserve memory context during compaction
  * - `chat.message` — session init with real user prompt
  *
  * Memory context is automatically injected into every conversation via system prompt.
@@ -162,17 +183,32 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
   let workerHealthy: boolean | null = null
   let initToastShown = false
 
-  /** Lazy worker health check + deferred init toast */
+  /**
+   * Lazy worker health check + deferred init toast.
+   *
+   * If the worker is offline and `bun` is on PATH, we attempt to launch it
+   * once via `bunx claude-mem start` (matches what `npx claude-mem install
+   * --ide opencode` users would run manually). Result is cached so subsequent
+   * calls are cheap.
+   */
   async function checkWorkerAndToast(): Promise<boolean> {
     if (workerHealthy === null) {
-      workerHealthy = await WorkerClient.isHealthy()
+      // First call — try to ensure the worker is actually running. If it
+      // already is, this is a single cheap health check. If it isn't, this
+      // spawns `bunx claude-mem start` once and waits up to ~8s for it to
+      // report healthy.
+      workerHealthy = await WorkerClient.ensureRunning()
     }
     if (!initToastShown) {
       initToastShown = true
       if (workerHealthy) {
         await toast(`Memory active · ${projectName}`, 'success')
       } else {
-        await toast('Worker offline — start Claude Code first', 'warning', 5000)
+        await toast(
+          'Worker offline — install Claude-Mem (bunx claude-mem start) or start Claude Code first',
+          'warning',
+          5000
+        )
       }
     }
     return workerHealthy
@@ -180,6 +216,74 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
 
   let currentSessionId: string | null = null
   const initializedSessions = new Set<string>()
+
+  /**
+   * Per-session debounced assistant-message buffer.
+   *
+   * Why debounce: `message.updated` fires on every streaming chunk. Sending each
+   * chunk to /api/sessions/observations would flood the worker with hundreds of
+   * partial duplicates per turn. We hold the latest text in a buffer, schedule a
+   * flush after `ASSISTANT_FLUSH_DEBOUNCE_MS` of quiet, and also flush on
+   * session.idle / session.deleted to guarantee the final message lands.
+   */
+  interface AssistantBuffer {
+    text: string
+    messageId: string | null
+    timer: ReturnType<typeof setTimeout> | null
+  }
+  const assistantBuffers = new Map<string, AssistantBuffer>()
+
+  async function flushAssistantBuffer(sessionId: string): Promise<void> {
+    const buf = assistantBuffers.get(sessionId)
+    if (!buf || !buf.text) {
+      return
+    }
+    if (buf.timer) {
+      clearTimeout(buf.timer)
+      buf.timer = null
+    }
+
+    const { text } = buf
+    // Reset buffer text BEFORE awaiting so concurrent updates start fresh.
+    buf.text = ''
+
+    try {
+      const sanitized = truncateUtf8Bytes(stripTaggedContent(text), MAX_OBSERVATION_BYTES)
+      if (sanitized) {
+        await WorkerClient.sendObservation(
+          sessionId,
+          'assistant_message',
+          buf.messageId ? { messageId: buf.messageId } : {},
+          sanitized,
+          projectRoot
+        )
+      }
+    } catch {
+      // silently fail
+    }
+  }
+
+  function scheduleAssistantFlush(sessionId: string): void {
+    const buf = assistantBuffers.get(sessionId)
+    if (!buf) {
+      return
+    }
+    if (buf.timer) {
+      clearTimeout(buf.timer)
+    }
+    buf.timer = setTimeout(() => {
+      buf.timer = null
+      void flushAssistantBuffer(sessionId)
+    }, ASSISTANT_FLUSH_DEBOUNCE_MS)
+  }
+
+  function discardAssistantBuffer(sessionId: string): void {
+    const buf = assistantBuffers.get(sessionId)
+    if (buf?.timer) {
+      clearTimeout(buf.timer)
+    }
+    assistantBuffers.delete(sessionId)
+  }
 
   /**
    * Helper: ensure a session is initialized with the worker.
@@ -207,84 +311,212 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
   }
 
   /**
-   * Helper: extract text content from message parts.
-   * Parts can be TextPart, ToolCallPart, etc. We only want text.
+   * Fetch the latest text content for an assistant message from OpenCode.
+   * Used by message.updated since the event payload only carries metadata.
    */
-  function extractTextFromParts(parts: any[]): string {
-    if (!parts || !Array.isArray(parts)) {
-      return ''
+  async function fetchAssistantMessageText(sessionId: string, messageId: string): Promise<string> {
+    try {
+      const result = await client.session.messages({ path: { id: sessionId } })
+      if (result.data && Array.isArray(result.data)) {
+        const target = result.data.find((m: any) => m?.info?.id === messageId)
+        if (target) {
+          return extractTextFromParts(target.parts)
+        }
+      }
+    } catch {
+      // Ignore — caller treats empty string as "skip flush this round"
     }
-    return parts
-      .filter((p: any) => p.type === 'text' && typeof p.text === 'string')
-      .map((p: any) => p.text)
-      .join('\n')
-      .trim()
+    return ''
+  }
+
+  /**
+   * Fetch the most recent user + assistant message texts for summarization.
+   */
+  async function fetchLastMessages(
+    sessionId: string
+  ): Promise<{ user: string; assistant: string }> {
+    let user = ''
+    let assistant = ''
+
+    try {
+      const result = await client.session.messages({ path: { id: sessionId } })
+      if (result.data && Array.isArray(result.data)) {
+        const messages = result.data
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].info.role === 'user') {
+            user = extractTextFromParts(messages[i].parts)
+            break
+          }
+        }
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].info.role === 'assistant') {
+            assistant = extractTextFromParts(messages[i].parts)
+            break
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    return { user, assistant }
   }
 
   return {
     /**
      * Hook: Event
-     * Handles session.created and session.idle events
+     * Handles session.created, session.idle, session.compacted, session.deleted,
+     * message.updated (assistant), and file.edited.
      */
     event: async ({ event }: { event: any }) => {
-      if (event.type === 'session.created') {
-        const sessionId = event.properties?.info?.id
-        if (!sessionId) {
-          return
-        }
-        // Do NOT call ensureSessionInit — that would use "SESSION_START" as prompt.
-        // Let chat.message handle init with the real user prompt.
-        currentSessionId = sessionId
-        // Invalidate context cache so new session fetches fresh context
-        // (includes summaries from previous sessions)
-        contextCache = undefined
-        await checkWorkerAndToast()
-      }
-
-      if (event.type === 'session.idle') {
-        const sessionId = event.properties?.sessionID || currentSessionId
-        if (!sessionId) {
+      switch (event.type) {
+        case 'session.created': {
+          const sessionId = event.properties?.info?.id
+          if (!sessionId) {
+            return
+          }
+          // Do NOT call ensureSessionInit — that would use "SESSION_START" as prompt.
+          // Let chat.message handle init with the real user prompt.
+          currentSessionId = sessionId
+          // Invalidate context cache so new session fetches fresh context
+          // (includes summaries from previous sessions)
+          contextCache = undefined
+          await checkWorkerAndToast()
           return
         }
 
-        try {
-          // P1: Fetch actual messages from the session for summarization
-          let lastUserMessage = ''
-          let lastAssistantMessage = ''
-
-          try {
-            const result = await client.session.messages({
-              path: { id: sessionId },
-            })
-
-            if (result.data && Array.isArray(result.data)) {
-              const messages = result.data
-
-              // Find last user message
-              for (let i = messages.length - 1; i >= 0; i--) {
-                if (messages[i].info.role === 'user') {
-                  lastUserMessage = extractTextFromParts(messages[i].parts)
-                  break
-                }
-              }
-
-              // Find last assistant message
-              for (let i = messages.length - 1; i >= 0; i--) {
-                if (messages[i].info.role === 'assistant') {
-                  lastAssistantMessage = extractTextFromParts(messages[i].parts)
-                  break
-                }
-              }
-            }
-          } catch {
-            // If fetching messages fails, proceed with empty strings
+        case 'message.updated': {
+          // Capture assistant message text as observation, debounced to avoid
+          // flooding the worker with streaming chunks. Skips user/system messages.
+          const info = event.properties?.info
+          const sessionId = info?.sessionID
+          const messageId = info?.id
+          if (!sessionId || !messageId || info?.role !== 'assistant') {
+            return
           }
 
-          await WorkerClient.summarize(sessionId, lastUserMessage, lastAssistantMessage)
-          await WorkerClient.completeSession(sessionId)
-          await toast('Session summarized', 'success', 2000)
-        } catch {
-          // silently fail
+          const isHealthy = await checkWorkerAndToast()
+          if (!isHealthy) {
+            return
+          }
+          if (!(await ensureSessionInit(sessionId))) {
+            return
+          }
+
+          const text = await fetchAssistantMessageText(sessionId, messageId)
+          if (!text) {
+            return
+          }
+
+          let buf = assistantBuffers.get(sessionId)
+          if (!buf) {
+            buf = { text: '', messageId: null, timer: null }
+            assistantBuffers.set(sessionId, buf)
+          }
+          buf.text = text
+          buf.messageId = messageId
+          scheduleAssistantFlush(sessionId)
+          return
+        }
+
+        case 'file.edited': {
+          // Forward file edits as standalone observations (mirrors the official
+          // claude-mem opencode plugin). The OpenCode SDK does not include the
+          // diff in the event payload, so we send the path only.
+          const filePath = event.properties?.file
+          const sessionId = currentSessionId
+          if (!sessionId || !filePath) {
+            return
+          }
+          const isHealthy = await checkWorkerAndToast()
+          if (!isHealthy) {
+            return
+          }
+          if (!(await ensureSessionInit(sessionId))) {
+            return
+          }
+
+          try {
+            await WorkerClient.sendObservation(
+              sessionId,
+              'file_edit',
+              { path: filePath },
+              `File edited: ${filePath}`,
+              projectRoot
+            )
+          } catch {
+            // silently fail
+          }
+          return
+        }
+
+        case 'session.compacted': {
+          // OpenCode finished compacting — flush any pending assistant buffer
+          // and trigger summarization of the latest user/assistant pair.
+          const sessionId = event.properties?.sessionID || currentSessionId
+          if (!sessionId) {
+            return
+          }
+          await flushAssistantBuffer(sessionId)
+
+          const isHealthy = await checkWorkerAndToast()
+          if (!isHealthy) {
+            return
+          }
+
+          try {
+            const { user, assistant } = await fetchLastMessages(sessionId)
+            await WorkerClient.summarize(sessionId, user, assistant)
+          } catch {
+            // silently fail
+          }
+          return
+        }
+
+        case 'session.idle': {
+          const sessionId = event.properties?.sessionID || currentSessionId
+          if (!sessionId) {
+            return
+          }
+          await flushAssistantBuffer(sessionId)
+
+          try {
+            const { user, assistant } = await fetchLastMessages(sessionId)
+            await WorkerClient.summarize(sessionId, user, assistant)
+            await WorkerClient.completeSession(sessionId)
+            await toast('Session summarized', 'success', 2000)
+          } catch {
+            // silently fail
+          }
+          return
+        }
+
+        case 'session.deleted': {
+          // OpenCode removed the session. Flush any pending buffer, then tell
+          // the worker so the sdk_sessions row is marked completed instead of
+          // hanging in 'active' as a zombie (the root cause of queueDepth
+          // accumulation seen in earlier worker logs).
+          const sessionId = event.properties?.info?.id || currentSessionId
+          if (!sessionId) {
+            return
+          }
+          await flushAssistantBuffer(sessionId)
+          discardAssistantBuffer(sessionId)
+          initializedSessions.delete(sessionId)
+          if (currentSessionId === sessionId) {
+            currentSessionId = null
+          }
+
+          try {
+            await WorkerClient.completeSession(sessionId)
+          } catch {
+            // silently fail
+          }
+          return
+        }
+
+        default: {
+          return
         }
       }
     },

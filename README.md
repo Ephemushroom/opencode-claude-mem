@@ -30,6 +30,9 @@ into new OpenCode sessions automatically.
 
 - **Shared Memory** — Uses the same Claude-Mem worker and memory store as
   Claude Code.
+- **Auto-Start** — When the plugin loads and the Claude-Mem worker is not
+  already running, it spawns `bunx claude-mem start` once per OpenCode process
+  (skipped silently if `bun` is not on `PATH` or the worker is already up).
 - **Automatic Context Injection** — Injects relevant project memory into the
   system prompt for new OpenCode turns.
 - **Compaction Support** — Re-injects memory context during OpenCode session
@@ -39,8 +42,8 @@ into new OpenCode sessions automatically.
 - **Observation Hardening** — Skips low-value meta tools, strips
   `<claude-mem-context>` and `<private>` tags before storage, and truncates
   oversized observation payloads by UTF-8 byte size.
-- **Graceful Degradation** — If the worker is offline, the plugin fails open
-  and OpenCode continues to work normally.
+- **Graceful Degradation** — If the worker is offline and cannot be started,
+  the plugin fails open and OpenCode continues to work normally.
 
 ## How It Works
 
@@ -55,7 +58,11 @@ OpenCode session
     |-- tool.execute.after ............. send tool observation
     |-- system.transform ............... inject memory into system prompt
     |-- session.compacting ............. preserve memory during compaction
-    '-- session.idle ................... summarize + complete session
+    |-- message.updated ................ capture assistant text (debounced)
+    |-- file.edited .................... record file edit observation
+    |-- session.compacted .............. summarize after compaction
+    |-- session.idle ................... flush + summarize + complete session
+    '-- session.deleted ................ flush + complete (no zombie sessions)
 ```
 
 The plugin is intentionally small. It only adapts OpenCode hook events to the
@@ -76,8 +83,11 @@ OpenCode <-> Plugin (this repo) <-> Claude-Mem Worker (port 37777) <-> SQLite + 
 | `SessionStart` | `experimental.session.compacting` | Preserve memory during compaction |
 | `UserPromptSubmit` | `chat.message` | Initialize session with real user prompt |
 | `PostToolUse` | `tool.execute.after` | Capture tool observations |
-| `Stop` | `event` (`session.idle`) | Summarize the session |
-| `SessionEnd` | `event` (`session.idle`) | Mark session complete |
+| _(streaming)_ | `event` (`message.updated`) | Capture assistant text (debounced) |
+| _(streaming)_ | `event` (`file.edited`) | Record file edit observations |
+| _(compaction)_ | `event` (`session.compacted`) | Summarize after OpenCode compacts |
+| `Stop` | `event` (`session.idle`) | Flush + summarize + complete |
+| `SessionEnd` | `event` (`session.deleted`) | Flush + complete (no zombie active rows) |
 
 ### Worker API Endpoints Used
 
@@ -141,8 +151,18 @@ Once installed, the plugin works automatically:
   OpenCode’s compaction path so memory survives conversation compression.
 - **Tool observation capture** — Tool executions are stored as observations,
   except for low-value/meta tools and Claude-Mem search tools.
-- **Session summarization** — On `session.idle`, the plugin fetches the latest
-  user and assistant messages and asks Claude-Mem to summarize them.
+- **Assistant message capture** — Assistant text from `message.updated` is
+  buffered with 250ms debounce per session and sent as a single
+  `assistant_message` observation per turn (avoids streaming-chunk floods).
+- **File edit capture** — `file.edited` events are forwarded as `file_edit`
+  observations (path only; OpenCode does not include diff in the event).
+- **Session summarization** — On `session.compacted` and `session.idle`, the
+  plugin flushes any pending assistant buffer, fetches the latest user and
+  assistant messages, and asks Claude-Mem to summarize them.
+- **Session lifecycle hygiene** — On `session.deleted` the plugin tells the
+  worker to `completeSession`, preventing zombie `'active'` rows from
+  accumulating stale `pending_messages` (the "queueDepth never decreases"
+  failure mode).
 
 ## Memory Search
 
@@ -207,7 +227,15 @@ curl -s http://127.0.0.1:37777/api/health
 
 ### OpenCode shows `Worker offline`
 
-- Restart Claude Code to bring Claude-Mem back up.
+The plugin will try to launch the worker via `bunx claude-mem start` once on
+plugin load. If that toast still appears:
+
+- Confirm `bun` is on your `PATH` — `bun --version` should print a version.
+- Confirm `claude-mem` is installed for `bunx`/`npx` — run
+  `bunx claude-mem --version` once to populate the cache.
+- On Windows after a forced kill, port `37777` may stay in `TIME_WAIT` for
+  30-120 seconds; wait it out or restart Claude Code.
+- Restart Claude Code to bring Claude-Mem back up via its own supervisor.
 - Verify the worker port is still `37777`.
 
 ### OpenCode crashes on startup
