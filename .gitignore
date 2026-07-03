@@ -5,3 +5,4 @@ package-lock.json
 .idea/
 nul
 .sisyphus/
+.omo/
