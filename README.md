@@ -9,7 +9,7 @@ into new OpenCode sessions automatically.
 
 > **Note:** This plugin is a thin OpenCode adapter for an existing Claude-Mem
 > installation. It does **not** install Claude-Mem, manage slash commands, or
-> start the worker for you.
+> register Claude Code MCP servers for you.
 
 ## Quick Start
 
@@ -39,6 +39,9 @@ into new OpenCode sessions automatically.
   compaction so long conversations keep their historical context.
 - **Observation Capture** — Sends tool observations to Claude-Mem for future
   retrieval and summarization.
+- **Native Memory Search** — Exposes a `mem-search` OpenCode tool backed by the
+  Claude-Mem worker search API, so search remains available without the Claude
+  Code compatibility bridge.
 - **Observation Hardening** — Skips low-value meta tools, strips
   `<claude-mem-context>` and `<private>` tags before storage, and truncates
   oversized observation payloads by UTF-8 byte size.
@@ -51,8 +54,9 @@ into new OpenCode sessions automatically.
 OpenCode session
     |
     |-- plugin loads
-    |   '-- connect to Claude-Mem worker on port 37777
+    |   '-- connect to Claude-Mem worker from env/settings/default endpoint
     |
+    |-- tool(mem-search) ............... search memory via worker API
     |-- session.created ................ track session + reset cache
     |-- chat.message ................... init session with real user prompt
     |-- tool.execute.after ............. send tool observation
@@ -61,7 +65,7 @@ OpenCode session
     |-- message.updated ................ capture assistant text (debounced)
     |-- file.edited .................... record file edit observation
     |-- session.compacted .............. summarize after compaction
-    |-- session.idle ................... flush + summarize + complete session
+    |-- session.idle ................... flush + summarize
     '-- session.deleted ................ flush + complete (no zombie sessions)
 ```
 
@@ -72,8 +76,12 @@ storage stay in upstream Claude-Mem.
 ## Architecture
 
 ```
-OpenCode <-> Plugin (this repo) <-> Claude-Mem Worker (port 37777) <-> SQLite + ChromaDB
+OpenCode <-> Plugin (this repo) <-> Claude-Mem Worker <-> SQLite + ChromaDB
 ```
+
+The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
+`CLAUDE_MEM_WORKER_PORT` environment variables, then
+`~/.claude-mem/settings.json`, then `127.0.0.1:37777`.
 
 ### Hook Mapping
 
@@ -83,10 +91,11 @@ OpenCode <-> Plugin (this repo) <-> Claude-Mem Worker (port 37777) <-> SQLite + 
 | `SessionStart` | `experimental.session.compacting` | Preserve memory during compaction |
 | `UserPromptSubmit` | `chat.message` | Initialize session with real user prompt |
 | `PostToolUse` | `tool.execute.after` | Capture tool observations |
+| Claude-Mem MCP | `tool` (`mem-search`) | Search memory from OpenCode |
 | _(streaming)_ | `event` (`message.updated`) | Capture assistant text (debounced) |
 | _(streaming)_ | `event` (`file.edited`) | Record file edit observations |
 | _(compaction)_ | `event` (`session.compacted`) | Summarize after OpenCode compacts |
-| `Stop` | `event` (`session.idle`) | Flush + summarize + complete |
+| `Stop` | `event` (`session.idle`) | Flush + summarize |
 | `SessionEnd` | `event` (`session.deleted`) | Flush + complete (no zombie active rows) |
 
 ### Worker API Endpoints Used
@@ -99,6 +108,11 @@ OpenCode <-> Plugin (this repo) <-> Claude-Mem Worker (port 37777) <-> SQLite + 
 | `POST` | `/api/sessions/observations` | Store tool observation |
 | `POST` | `/api/sessions/summarize` | Trigger summarization |
 | `POST` | `/api/sessions/complete` | Complete session |
+| `GET` | `/api/search?query={query}&project={name}` | Search memory |
+
+Session and observation writes include `platformSource: "opencode"` so
+Claude-Mem can attribute new OpenCode memories separately from Claude Code,
+while context injection and `mem-search` still search the shared project memory.
 
 ## Installation
 
@@ -107,7 +121,8 @@ OpenCode <-> Plugin (this repo) <-> Claude-Mem Worker (port 37777) <-> SQLite + 
 - [Claude Code](https://claude.com/claude-code) with
   [Claude-Mem](https://github.com/thedotmack/claude-mem) installed
 - [OpenCode](https://opencode.ai) with plugin support
-- A running Claude-Mem worker on port `37777` (default)
+- A running Claude-Mem worker (default `127.0.0.1:37777`, or your
+  `CLAUDE_MEM_WORKER_HOST` / `CLAUDE_MEM_WORKER_PORT` settings)
 
 ### Step 1: Install Claude-Mem
 
@@ -151,6 +166,8 @@ Once installed, the plugin works automatically:
   OpenCode’s compaction path so memory survives conversation compression.
 - **Tool observation capture** — Tool executions are stored as observations,
   except for low-value/meta tools and Claude-Mem search tools.
+- **Memory search** — The `mem-search` tool queries the worker's `/api/search`
+  endpoint for the current project.
 - **Assistant message capture** — Assistant text from `message.updated` is
   buffered with 250ms debounce per session and sent as a single
   `assistant_message` observation per turn (avoids streaming-chunk floods).
@@ -166,17 +183,21 @@ Once installed, the plugin works automatically:
 
 ## Memory Search
 
-Memory search is provided by Claude-Mem’s MCP server, not by this plugin.
+This plugin provides a native OpenCode tool named `mem-search`. It calls the
+Claude-Mem worker's `/api/search` endpoint for the current project and returns
+the same formatted result text the worker exposes over HTTP.
 
-If your OpenCode environment already has Claude-Mem MCP tools configured, the
-assistant can query project memory directly with Claude-Mem’s search workflow:
+Claude Code's claude-mem plugin also registers an MCP server through its own
+`.mcp.json`. OpenCode does not automatically load Claude Code plugin MCP
+servers. If you previously saw Claude-Mem MCP tools in OpenCode, they were most
+likely supplied by a Claude Code compatibility bridge such as oh-my-openagent.
+Disabling that bridge for `claude-mem@thedotmack` removes those bridged MCP
+tools; `mem-search` is the native replacement inside this plugin.
 
-1. `search(query="...")`
-2. `timeline(anchor=ID)`
-3. `get_observations(ids=[...])`
-
-This plugin focuses on sending memory data to the worker and injecting returned
-context back into OpenCode sessions.
+The richer Claude-Mem MCP workflow (`search`, `timeline`, `get_observations`) can
+still be configured separately in OpenCode if you want it. It is not required for
+automatic context injection, observation capture, summarization, or the built-in
+`mem-search` tool.
 
 ## Key Implementation Details
 
@@ -188,6 +209,11 @@ context back into OpenCode sessions.
   avoiding startup crashes caused by early TUI access.
 - **Real prompt initialization** — `chat.message` sends the actual user prompt
   to Claude-Mem instead of a synthetic placeholder.
+- **OpenCode attribution** — Session, observation, summarize, and complete
+  payloads include `platformSource: "opencode"`.
+- **Worker endpoint resolution** — The plugin reads `CLAUDE_MEM_WORKER_HOST` /
+  `CLAUDE_MEM_WORKER_PORT`, then `~/.claude-mem/settings.json`, then defaults to
+  `127.0.0.1:37777`.
 - **Real summarize payloads** — On `session.idle`, the plugin reads the latest
   session messages and sends the last user and assistant messages for summary.
 - **Context caching** — Memory context is fetched once per session and reused
@@ -199,6 +225,10 @@ context back into OpenCode sessions.
   reduce token waste and avoid oversize worker payloads.
 - **Field name correctness** — Worker payloads use `contentSessionId`, not
   `claudeSessionId`.
+- **PreToolUse file context** — Claude Code's native `PreToolUse Read`
+  `file-context` hook is not mirrored because the current OpenCode plugin
+  `tool.execute.before` API only lets plugins alter tool args; it has no channel
+  to inject extra LLM context before the tool call.
 
 ## Differences from `bloodf/opencode-mem`
 
@@ -253,9 +283,10 @@ plugin load. If that toast still appears:
 
 ### Memory search is unavailable
 
-- This plugin does not configure MCP tools for you.
-- Configure Claude-Mem’s MCP server separately in your OpenCode environment if
-  you want in-editor memory search.
+- Use the built-in `mem-search` tool exposed by this plugin.
+- If you specifically need Claude-Mem's MCP `timeline` or `get_observations`
+  tools, configure the Claude-Mem MCP server separately in OpenCode or enable a
+  compatible bridge for MCP only.
 
 ## Development
 

@@ -1,7 +1,7 @@
 # AGENTS.md — opencode-claude-mem
 
 OpenCode plugin for Claude-Mem persistent memory system. Thin HTTP client that
-bridges OpenCode hooks to the Claude-Mem worker service (port 37777).
+bridges OpenCode hooks to the Claude-Mem worker service.
 
 ## Project Overview
 
@@ -85,8 +85,7 @@ pattern for service clients in this codebase. Follow it for new service classes.
 
 ```typescript
 export class ServiceClient {
-  private static readonly PORT = 37777
-  private static readonly BASE_URL = `http://127.0.0.1:${ServiceClient.PORT}`
+  private static readonly BASE_URL = getWorkerBaseUrl()
 
   static async methodName(): Promise<ReturnType> {
     // ...
@@ -146,15 +145,17 @@ Hook handlers available:
 ### Critical Implementation Details
 
 - **Field name**: Worker API uses `contentSessionId` (NOT `claudeSessionId`) — wrong name causes silent failures
+- **Platform source**: Worker write payloads include `platformSource: "opencode"` for attribution
+- **Worker endpoint**: Resolve host/port from env, then `~/.claude-mem/settings.json`, then `127.0.0.1:37777`
 - **Deferred toast**: Never call `client.tui.showToast()` during plugin init — TUI isn't ready, crashes OpenCode
 - **Idempotent init**: `ensureSessionInit()` tracks initialized sessions in a `Set` — safe to call repeatedly
-- **Context caching**: `getCachedContext()` wraps `WorkerClient.getContext()` with a 30s TTL cache (`CONTEXT_CACHE_TTL`) to avoid redundant fetches between `session.created` (display) and `experimental.chat.system.transform` (LLM injection)
-- **Inline context display**: On `session.created`, context is displayed in the chat flow via `sendStatusMessage()` using `client.session.prompt({ noReply: true, parts: [{ ignored: true }] })` — visible to user, not sent to LLM. Falls back to toast if injection fails.
-- **Double notification suppression**: `contextDisplayedInline` flag prevents `checkWorkerAndToast()` from showing a redundant "Memory active" toast when context is already displayed inline
+- **Context caching**: `getCachedContext()` fetches context once per OpenCode session and resets on `session.created`
+- **Search tool**: `mem-search` calls `/api/search?query=...&project=...` and is skipped by observation capture
+- **MCP boundary**: Claude Code plugin MCP is not automatically available in OpenCode; configure MCP separately if `timeline`/`get_observations` are needed
 
 ## Worker API Endpoints
 
-All calls go to `http://127.0.0.1:37777`:
+Calls go to the resolved Claude-Mem worker endpoint:
 
 | Method | Endpoint                          | Purpose                    |
 |--------|-----------------------------------|----------------------------|
@@ -164,7 +165,7 @@ All calls go to `http://127.0.0.1:37777`:
 | POST   | `/api/sessions/observations`      | Send tool observation      |
 | POST   | `/api/sessions/summarize`         | Trigger summarization      |
 | POST   | `/api/sessions/complete`          | Complete session           |
-| GET    | `/api/search?q=...&project=...`   | Search memory              |
+| GET    | `/api/search?query=...&project=...` | Search memory            |
 
 ## File Structure
 
