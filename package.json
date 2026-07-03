@@ -16,10 +16,14 @@
     "./server": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
     }
   },
   "scripts": {
-    "build": "bun build src/index.ts --outfile dist/index.js --target bun --format esm && tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "build": "bun build src/index.ts --outfile dist/index.js --target bun --format esm && bun build src/tui.ts --outfile dist/tui.js --target bun --format esm --external @opentui/solid && tsc -p tsconfig.build.json --emitDeclarationOnly",
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
     "lint": "oxlint",
