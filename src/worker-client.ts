@@ -376,6 +376,109 @@ export class WorkerClient {
     }
   }
 
+  /**
+   * Timeline: get chronological context around an observation anchor or query.
+   * Mirrors the upstream MCP `timeline` tool (GET /api/timeline).
+   */
+  static async timeline(options: {
+    project: string
+    anchor?: number
+    query?: string
+    depthBefore?: number
+    depthAfter?: number
+  }): Promise<string> {
+    try {
+      const params = new URLSearchParams({ project: options.project })
+      if (options.anchor !== undefined) {
+        params.set('anchor', String(options.anchor))
+      }
+      if (options.query) {
+        params.set('query', options.query)
+      }
+      if (options.depthBefore !== undefined) {
+        params.set('depth_before', String(options.depthBefore))
+      }
+      if (options.depthAfter !== undefined) {
+        params.set('depth_after', String(options.depthAfter))
+      }
+
+      const response = await fetch(`${this.BASE_URL}/api/timeline?${params.toString()}`)
+      if (!response.ok) {
+        return ''
+      }
+      const contentType = response.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        return extractTextContent(await response.json()) || ''
+      }
+      const text = await response.text()
+      return text.trim()
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * Fetch full observation details by IDs.
+   * Mirrors the upstream MCP `get_observations` tool (POST /api/observations/batch).
+   */
+  static async getObservations(ids: number[], project?: string): Promise<string> {
+    try {
+      const body: JsonRecord = { ids }
+      if (project) {
+        body['project'] = project
+      }
+      const response = await fetch(`${this.BASE_URL}/api/observations/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!response.ok) {
+        return ''
+      }
+      const contentType = response.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        const payload: unknown = await response.json()
+        // /api/observations/batch returns a raw JSON array of observation rows
+        if (Array.isArray(payload)) {
+          return payload.length ? JSON.stringify(payload, null, 2) : ''
+        }
+        return extractTextContent(payload) || ''
+      }
+      const text = await response.text()
+      return text.trim()
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * Fetch worker + database stats plus processing status for the sidebar view.
+   * Combines GET /api/stats and GET /api/processing-status; null when offline.
+   */
+  static async getStats(): Promise<{
+    database?: { observations?: number; sessions?: number; summaries?: number }
+    processing?: { isProcessing?: boolean; queueDepth?: number }
+  } | null> {
+    try {
+      const [statsRes, processingRes] = await Promise.all([
+        fetch(`${this.BASE_URL}/api/stats`),
+        fetch(`${this.BASE_URL}/api/processing-status`),
+      ])
+      if (!statsRes.ok) {
+        return null
+      }
+      const stats = (await statsRes.json()) as {
+        database?: { observations?: number; sessions?: number; summaries?: number }
+      }
+      const processing = processingRes.ok
+        ? ((await processingRes.json()) as { isProcessing?: boolean; queueDepth?: number })
+        : undefined
+      return { database: stats.database, processing }
+    } catch {
+      return null
+    }
+  }
+
   static async search(query: string, project: string, limit?: number): Promise<string> {
     try {
       const params = new URLSearchParams({ query, project })
