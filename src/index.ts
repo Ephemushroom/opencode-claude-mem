@@ -9,7 +9,9 @@ const META_TOOLS = new Set([
   'getmcpresource',
   'listmcpresourcestool',
   'listmcptools',
+  'mem-get-observations',
   'mem-search',
+  'mem-timeline',
   'skill',
   'slashcommand',
   'todowrite',
@@ -390,6 +392,75 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
 
           const result = await WorkerClient.search(query, projectName, limit)
           return result || `No Claude-Mem results found for "${query}".`
+        },
+      }),
+      'mem-timeline': tool({
+        description:
+          'Get chronological Claude-Mem context around an observation. Use after mem-search: pass an observation ID as anchor (or a query to find the anchor automatically) to see what happened before/after.',
+        args: {
+          anchor: tool.schema
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe('Observation ID to center the timeline around'),
+          query: tool.schema
+            .string()
+            .min(1)
+            .optional()
+            .describe('Query to locate the anchor automatically (used when anchor is omitted)'),
+          depth_before: tool.schema
+            .number()
+            .int()
+            .min(0)
+            .max(20)
+            .optional()
+            .describe('Items before the anchor (default 3)'),
+          depth_after: tool.schema
+            .number()
+            .int()
+            .min(0)
+            .max(20)
+            .optional()
+            .describe('Items after the anchor (default 3)'),
+        },
+        execute: async ({ anchor, query, depth_before, depth_after }) => {
+          if (anchor === undefined && !query) {
+            return 'Provide either an anchor observation ID or a query.'
+          }
+          const isHealthy = await checkWorkerAndToast()
+          if (!isHealthy) {
+            return 'Claude-Mem worker is offline. Start Claude-Mem and retry.'
+          }
+
+          const result = await WorkerClient.timeline({
+            project: projectName,
+            anchor,
+            query,
+            depthBefore: depth_before,
+            depthAfter: depth_after,
+          })
+          return result || 'No Claude-Mem timeline results found.'
+        },
+      }),
+      'mem-get-observations': tool({
+        description:
+          'Fetch full Claude-Mem observation details by ID. Use for IDs shown in the injected memory context or returned by mem-search/mem-timeline.',
+        args: {
+          ids: tool.schema
+            .array(tool.schema.number().int().positive())
+            .min(1)
+            .max(50)
+            .describe('Observation IDs to fetch'),
+        },
+        execute: async ({ ids }) => {
+          const isHealthy = await checkWorkerAndToast()
+          if (!isHealthy) {
+            return 'Claude-Mem worker is offline. Start Claude-Mem and retry.'
+          }
+
+          const result = await WorkerClient.getObservations(ids, projectName)
+          return result || `No Claude-Mem observations found for IDs [${ids.join(', ')}].`
         },
       }),
     },
