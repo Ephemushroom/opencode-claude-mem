@@ -39,9 +39,13 @@ into new OpenCode sessions automatically.
   compaction so long conversations keep their historical context.
 - **Observation Capture** — Sends tool observations to Claude-Mem for future
   retrieval and summarization.
-- **Native Memory Search** — Exposes a `mem-search` OpenCode tool backed by the
-  Claude-Mem worker search API, so search remains available without the Claude
-  Code compatibility bridge.
+- **Native Memory Tools** — Exposes `mem-search`, `mem-timeline`, and
+  `mem-get-observations` OpenCode tools backed by the Claude-Mem worker API,
+  covering the full search → timeline → details workflow without the Claude
+  Code compatibility bridge or an MCP server.
+- **Sidebar Status** — Registers a TUI sidebar panel ("Memory") showing worker
+  health, project, observation/summary/session counts, and processing queue
+  depth, refreshed every few seconds.
 - **Observation Hardening** — Skips low-value meta tools, strips
   `<claude-mem-context>` and `<private>` tags before storage, and truncates
   oversized observation payloads by UTF-8 byte size.
@@ -91,7 +95,9 @@ The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
 | `SessionStart` | `experimental.session.compacting` | Preserve memory during compaction |
 | `UserPromptSubmit` | `chat.message` | Initialize session with real user prompt |
 | `PostToolUse` | `tool.execute.after` | Capture tool observations |
-| Claude-Mem MCP | `tool` (`mem-search`) | Search memory from OpenCode |
+| Claude-Mem MCP `search` | `tool` (`mem-search`) | Search memory from OpenCode |
+| Claude-Mem MCP `timeline` | `tool` (`mem-timeline`) | Chronological context around an observation |
+| Claude-Mem MCP `get_observations` | `tool` (`mem-get-observations`) | Fetch full observation details by ID |
 | _(streaming)_ | `event` (`message.updated`) | Capture assistant text (debounced) |
 | _(streaming)_ | `event` (`file.edited`) | Record file edit observations |
 | _(compaction)_ | `event` (`session.compacted`) | Summarize after OpenCode compacts |
@@ -109,6 +115,9 @@ The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
 | `POST` | `/api/sessions/summarize` | Trigger summarization |
 | `POST` | `/api/sessions/complete` | Complete session |
 | `GET` | `/api/search?query={query}&project={name}` | Search memory |
+| `GET` | `/api/timeline?project={name}&anchor={id}` | Chronological context around an observation |
+| `POST` | `/api/observations/batch` | Fetch full observation details by ID |
+| `GET` | `/api/stats` + `/api/processing-status` | Sidebar status panel |
 
 Session and observation writes include `platformSource: "opencode"` so
 Claude-Mem can attribute new OpenCode memories separately from Claude Code,
@@ -181,23 +190,38 @@ Once installed, the plugin works automatically:
   accumulating stale `pending_messages` (the "queueDepth never decreases"
   failure mode).
 
-## Memory Search
+## Memory Tools
 
-This plugin provides a native OpenCode tool named `mem-search`. It calls the
-Claude-Mem worker's `/api/search` endpoint for the current project and returns
-the same formatted result text the worker exposes over HTTP.
+This plugin provides three native OpenCode tools backed by the Claude-Mem
+worker's HTTP API. They cover the same search → timeline → details workflow as
+the upstream Claude-Mem MCP server, without requiring an MCP server or the
+Claude Code compatibility bridge:
+
+- **`mem-search`** — `GET /api/search`. Returns a formatted index of matching
+  observations (with IDs) for the current project.
+- **`mem-timeline`** — `GET /api/timeline`. Given an observation ID as `anchor`
+  (or a `query` to locate one), returns the chronological records around it.
+- **`mem-get-observations`** — `POST /api/observations/batch`. Fetches full
+  observation details for a list of IDs (e.g. IDs surfaced in the injected
+  memory context or by `mem-search`).
 
 Claude Code's claude-mem plugin also registers an MCP server through its own
 `.mcp.json`. OpenCode does not automatically load Claude Code plugin MCP
 servers. If you previously saw Claude-Mem MCP tools in OpenCode, they were most
 likely supplied by a Claude Code compatibility bridge such as oh-my-openagent.
 Disabling that bridge for `claude-mem@thedotmack` removes those bridged MCP
-tools; `mem-search` is the native replacement inside this plugin.
+tools; the three `mem-*` tools above are the native replacements inside this
+plugin, so a separately configured MCP server is not required.
 
-The richer Claude-Mem MCP workflow (`search`, `timeline`, `get_observations`) can
-still be configured separately in OpenCode if you want it. It is not required for
-automatic context injection, observation capture, summarization, or the built-in
-`mem-search` tool.
+## Sidebar Status
+
+When running in the OpenCode TUI, the plugin registers a sidebar panel titled
+**Memory** via its `./tui` export. It polls `/api/stats` and
+`/api/processing-status` every few seconds and shows worker health, the current
+project, observation/summary/session counts, and the processing queue depth. The
+panel fails open — if the worker is offline it simply shows `worker offline` and
+never blocks the TUI. Requires OpenCode's `@opentui/solid` runtime; if that is
+unavailable the panel is skipped silently.
 
 ## Key Implementation Details
 
@@ -281,12 +305,13 @@ plugin load. If that toast still appears:
   design.
 - Very large tool outputs are truncated before storage.
 
-### Memory search is unavailable
+### Memory tools are unavailable
 
-- Use the built-in `mem-search` tool exposed by this plugin.
-- If you specifically need Claude-Mem's MCP `timeline` or `get_observations`
-  tools, configure the Claude-Mem MCP server separately in OpenCode or enable a
-  compatible bridge for MCP only.
+- Use the built-in `mem-search`, `mem-timeline`, and `mem-get-observations`
+  tools exposed by this plugin — they cover the full Claude-Mem search workflow
+  natively, so a separate MCP server is not required.
+- If the tools return `worker is offline`, confirm the worker health endpoint
+  responds (see above).
 
 ## Development
 
