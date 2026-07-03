@@ -1,13 +1,26 @@
 /**
  * Worker Client for Claude-Mem
- * Handles communication with the local worker service running on port 37777.
+ * Handles communication with the local worker service.
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 
 const HEALTH_TIMEOUT_MS = 1000
 const AUTOSTART_POLL_INTERVAL_MS = 500
 const AUTOSTART_POLL_MAX_ATTEMPTS = 16
+const DEFAULT_WORKER_HOST = '127.0.0.1'
+const DEFAULT_WORKER_PORT = 37777
+const PLATFORM_SOURCE = 'opencode'
+const SETTINGS_FILE = join(homedir(), '.claude-mem', 'settings.json')
+
+export interface WorkerEndpoint {
+  readonly host: string
+  readonly port: number
+}
+
+type JsonRecord = Record<string, unknown>
 
 export type AutoStartResult =
   | 'already-running'
@@ -17,10 +30,100 @@ export type AutoStartResult =
   | 'timeout'
   | 'skipped'
 
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function readString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  return trimmed || null
+}
+
+function readPort(value: unknown): number | null {
+  const text = readString(value)
+  if (!text || !/^\d+$/.test(text)) {
+    return null
+  }
+  const port = Number(text)
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
+}
+
+function parseSettings(rawSettings: string | null): JsonRecord {
+  if (!rawSettings) {
+    return {}
+  }
+  try {
+    const parsed: unknown = JSON.parse(rawSettings)
+    return isRecord(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+export function parseWorkerEndpoint(
+  env: Record<string, string | undefined>,
+  rawSettings: string | null
+): WorkerEndpoint {
+  const settings = parseSettings(rawSettings)
+  const host =
+    readString(env['CLAUDE_MEM_WORKER_HOST']) ??
+    readString(settings['CLAUDE_MEM_WORKER_HOST']) ??
+    DEFAULT_WORKER_HOST
+  const port =
+    readPort(env['CLAUDE_MEM_WORKER_PORT']) ??
+    readPort(settings['CLAUDE_MEM_WORKER_PORT']) ??
+    DEFAULT_WORKER_PORT
+
+  return { host, port }
+}
+
+function readSettingsRaw(): string | null {
+  try {
+    return readFileSync(SETTINGS_FILE, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+function getWorkerBaseUrl(): string {
+  const endpoint = parseWorkerEndpoint(process.env, readSettingsRaw())
+  return `http://${endpoint.host}:${endpoint.port}`
+}
+
+function extractTextContent(value: unknown): string | null {
+  if (typeof value === 'string') {
+    return value.trim() || null
+  }
+  if (!isRecord(value)) {
+    return null
+  }
+  const { content } = value
+  if (typeof content === 'string') {
+    return content.trim() || null
+  }
+  if (Array.isArray(content)) {
+    const text = content
+      .map((part) => {
+        if (!isRecord(part) || part['type'] !== 'text' || typeof part['text'] !== 'string') {
+          return ''
+        }
+        return part['text']
+      })
+      .filter(Boolean)
+      .join('\n')
+      .trim()
+    return text || null
+  }
+  const text = JSON.stringify(value, null, 2)
+  return text === '{}' || text === 'null' ? null : text
+}
+
 // oxlint-disable-next-line typescript/no-extraneous-class
 export class WorkerClient {
-  private static readonly PORT = 37777
-  private static readonly BASE_URL = `http://127.0.0.1:${WorkerClient.PORT}`
+  private static readonly BASE_URL = getWorkerBaseUrl()
 
   /** Per-process guard so multiple OpenCode windows don't all spawn workers. */
   private static autoStartPromise: Promise<AutoStartResult> | null = null
@@ -166,7 +269,12 @@ export class WorkerClient {
       const response = await fetch(`${this.BASE_URL}/api/sessions/init`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contentSessionId, project, prompt }),
+        body: JSON.stringify({
+          contentSessionId,
+          project,
+          prompt,
+          platformSource: PLATFORM_SOURCE,
+        }),
       })
       if (!response.ok) {
         return null
@@ -197,6 +305,7 @@ export class WorkerClient {
           tool_input: toolInput,
           tool_response: toolResponse,
           cwd,
+          platformSource: PLATFORM_SOURCE,
         }),
       })
     } catch {
@@ -220,6 +329,7 @@ export class WorkerClient {
           contentSessionId,
           last_user_message: lastUserMessage,
           last_assistant_message: lastAssistantMessage,
+          platformSource: PLATFORM_SOURCE,
         }),
       })
     } catch {
@@ -235,7 +345,7 @@ export class WorkerClient {
       await fetch(`${this.BASE_URL}/api/sessions/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contentSessionId }),
+        body: JSON.stringify({ contentSessionId, platformSource: PLATFORM_SOURCE }),
       })
     } catch {
       // silently fail
@@ -256,21 +366,35 @@ export class WorkerClient {
       }
       const contentType = response.headers.get('content-type') || ''
       if (contentType.includes('application/json')) {
-        const data: any = await response.json()
-        if (typeof data === 'string') {
-          return data
-        }
-        if (data && typeof data.content === 'string') {
-          return data.content
-        }
-        const text = JSON.stringify(data, null, 2)
-        return text === '{}' || text === 'null' ? null : text
+        return extractTextContent(await response.json())
       }
       // Worker returns text/plain markdown
       const text = await response.text()
       return text.trim() || null
     } catch {
       return null
+    }
+  }
+
+  static async search(query: string, project: string, limit?: number): Promise<string> {
+    try {
+      const params = new URLSearchParams({ query, project })
+      if (limit !== undefined) {
+        params.set('limit', String(limit))
+      }
+
+      const response = await fetch(`${this.BASE_URL}/api/search?${params.toString()}`)
+      if (!response.ok) {
+        return ''
+      }
+      const contentType = response.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        return extractTextContent(await response.json()) || ''
+      }
+      const text = await response.text()
+      return text.trim()
+    } catch {
+      return ''
     }
   }
 }
