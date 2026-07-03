@@ -1,4 +1,4 @@
-import { type Plugin, type PluginModule } from '@opencode-ai/plugin'
+import { type Plugin, type PluginModule, tool } from '@opencode-ai/plugin'
 import { WorkerClient } from './worker-client'
 
 const MAX_OBSERVATION_BYTES = 24 * 1024
@@ -9,6 +9,7 @@ const META_TOOLS = new Set([
   'getmcpresource',
   'listmcpresourcestool',
   'listmcptools',
+  'mem-search',
   'skill',
   'slashcommand',
   'todowrite',
@@ -91,7 +92,12 @@ function shouldSkipObservationTool(toolName: string): boolean {
   }
 
   const normalizedName = toolName.toLowerCase()
-  return normalizedName.startsWith('claude-mem_mcp-search_') || META_TOOLS.has(normalizedName)
+  // Skip Claude-Mem's own MCP search tools regardless of the user-chosen MCP
+  // server name (prefix varies: `claude-mem_mcp-search_`, `mem_...`, etc.)
+  if (normalizedName.includes('mcp-search') || normalizedName.includes('mem-search')) {
+    return true
+  }
+  return META_TOOLS.has(normalizedName)
 }
 
 function normalizeToolOutput(output: unknown): string {
@@ -227,7 +233,6 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
    * session.idle / session.deleted to guarantee the final message lands.
    */
   interface AssistantBuffer {
-    text: string
     messageId: string | null
     timer: ReturnType<typeof setTimeout> | null
   }
@@ -235,7 +240,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
 
   async function flushAssistantBuffer(sessionId: string): Promise<void> {
     const buf = assistantBuffers.get(sessionId)
-    if (!buf || !buf.text) {
+    if (!buf || !buf.messageId) {
       return
     }
     if (buf.timer) {
@@ -243,17 +248,18 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       buf.timer = null
     }
 
-    const { text } = buf
-    // Reset buffer text BEFORE awaiting so concurrent updates start fresh.
-    buf.text = ''
+    const { messageId } = buf
+    // Reset BEFORE awaiting so concurrent updates start fresh.
+    buf.messageId = null
 
     try {
+      const text = await fetchAssistantMessageText(sessionId, messageId)
       const sanitized = truncateUtf8Bytes(stripTaggedContent(text), MAX_OBSERVATION_BYTES)
       if (sanitized) {
         await WorkerClient.sendObservation(
           sessionId,
           'assistant_message',
-          buf.messageId ? { messageId: buf.messageId } : {},
+          { messageId },
           sanitized,
           projectRoot
         )
@@ -363,6 +369,31 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
   }
 
   return {
+    tool: {
+      'mem-search': tool({
+        description: 'Search Claude-Mem persistent memory for this OpenCode project.',
+        args: {
+          query: tool.schema.string().min(1).describe('Search query for Claude-Mem memory'),
+          limit: tool.schema
+            .number()
+            .int()
+            .positive()
+            .max(50)
+            .optional()
+            .describe('Maximum number of search results'),
+        },
+        execute: async ({ query, limit }) => {
+          const isHealthy = await checkWorkerAndToast()
+          if (!isHealthy) {
+            return 'Claude-Mem worker is offline. Start Claude-Mem and retry the search.'
+          }
+
+          const result = await WorkerClient.search(query, projectName, limit)
+          return result || `No Claude-Mem results found for "${query}".`
+        },
+      }),
+    },
+
     /**
      * Hook: Event
      * Handles session.created, session.idle, session.compacted, session.deleted,
@@ -403,17 +434,11 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
             return
           }
 
-          const text = await fetchAssistantMessageText(sessionId, messageId)
-          if (!text) {
-            return
-          }
-
           let buf = assistantBuffers.get(sessionId)
           if (!buf) {
-            buf = { text: '', messageId: null, timer: null }
+            buf = { messageId: null, timer: null }
             assistantBuffers.set(sessionId, buf)
           }
-          buf.text = text
           buf.messageId = messageId
           scheduleAssistantFlush(sessionId)
           return
@@ -483,7 +508,6 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
           try {
             const { user, assistant } = await fetchLastMessages(sessionId)
             await WorkerClient.summarize(sessionId, user, assistant)
-            await WorkerClient.completeSession(sessionId)
             await toast('Session summarized', 'success', 2000)
           } catch {
             // silently fail
