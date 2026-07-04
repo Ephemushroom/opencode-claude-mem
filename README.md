@@ -118,6 +118,7 @@ The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
 | `GET` | `/api/timeline?project={name}&anchor={id}` | Chronological context around an observation |
 | `POST` | `/api/observations/batch` | Fetch full observation details by ID |
 | `GET` | `/api/stats` + `/api/processing-status` | Sidebar status panel |
+| `GET` | `/api/summaries` + `/api/observations` | Sidebar recent items (expanded only) |
 
 Session and observation writes include `platformSource: "opencode"` so
 Claude-Mem can attribute new OpenCode memories separately from Claude Code,
@@ -215,13 +216,28 @@ plugin, so a separately configured MCP server is not required.
 
 ## Sidebar Status
 
-When running in the OpenCode TUI, the plugin registers a sidebar panel titled
-**Memory** via its `./tui` export. It polls `/api/stats` and
-`/api/processing-status` every few seconds and shows worker health, the current
-project, observation/summary/session counts, and the processing queue depth. The
-panel fails open — if the worker is offline it simply shows `worker offline` and
-never blocks the TUI. Requires OpenCode's `@opentui/solid` runtime; if that is
-unavailable the panel is skipped silently.
+When running in the OpenCode TUI, the plugin registers a sidebar section titled
+**Memory** via its `./tui` export, styled after OpenCode's native MCP/Context
+sections: a borderless, click-to-toggle collapsible block.
+
+- **Collapsed (default)** — a single line: `▶ Memory (online, 11.7k obs)`.
+  The summary turns yellow when the worker is processing (`(queue N)`) and red
+  when it is offline (`(offline)`).
+- **Expanded** — click the header to expand: database counts, processing
+  status, the last 3 session summaries (`Recent sessions`), and the last 3
+  observations (`Latest`, with the same type icons used in the injected
+  context: ◆ feature, ● bugfix, ⚖ decision, ○ discovery, …).
+
+Recent items are only fetched while expanded, so the collapsed poll loop stays
+cheap. The panel fails open — if the worker is offline it simply shows the
+offline state and never blocks the TUI. Requires OpenCode's `@opentui/solid`
+runtime; if that is unavailable the panel is skipped silently.
+
+The plugin also self-heals `~/.config/opencode/tui.json` on load (like
+oh-my-openagent does): if the plugin is registered as a server plugin in
+`opencode.json` but missing from the TUI plugin list, it appends itself so the
+sidebar loads without manual configuration. Symlinked `tui.json` files are
+written through, preserving dotfiles setups.
 
 ## Key Implementation Details
 
