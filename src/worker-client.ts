@@ -479,6 +479,65 @@ export class WorkerClient {
     }
   }
 
+  /**
+   * Recent session summaries for the sidebar (GET /api/summaries).
+   */
+  static async getRecentSummaries(
+    project: string,
+    limit: number
+  ): Promise<{ id: number; request: string }[]> {
+    try {
+      const params = new URLSearchParams({ project, limit: String(limit) })
+      const response = await fetch(`${this.BASE_URL}/api/summaries?${params.toString()}`)
+      if (!response.ok) {
+        return []
+      }
+      const payload = (await response.json()) as { items?: unknown }
+      if (!Array.isArray(payload.items)) {
+        return []
+      }
+      return payload.items.flatMap((item) => {
+        if (!isRecord(item) || typeof item['id'] !== 'number') {
+          return []
+        }
+        const request = typeof item['request'] === 'string' ? item['request'].trim() : ''
+        return request ? [{ id: item['id'], request }] : []
+      })
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Recent observations for the sidebar (GET /api/observations).
+   */
+  static async getRecentObservations(
+    project: string,
+    limit: number
+  ): Promise<{ id: number; type: string; title: string }[]> {
+    try {
+      const params = new URLSearchParams({ project, limit: String(limit) })
+      const response = await fetch(`${this.BASE_URL}/api/observations?${params.toString()}`)
+      if (!response.ok) {
+        return []
+      }
+      const payload = (await response.json()) as { items?: unknown }
+      if (!Array.isArray(payload.items)) {
+        return []
+      }
+      return payload.items.flatMap((item) => {
+        if (!isRecord(item) || typeof item['id'] !== 'number') {
+          return []
+        }
+        const title = typeof item['title'] === 'string' ? item['title'].trim() : ''
+        const type = typeof item['type'] === 'string' ? item['type'] : ''
+        return title ? [{ id: item['id'], type, title }] : []
+      })
+    } catch {
+      return []
+    }
+  }
+
   static async search(query: string, project: string, limit?: number): Promise<string> {
     try {
       const params = new URLSearchParams({ query, project })
