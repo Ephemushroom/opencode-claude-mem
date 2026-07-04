@@ -211,6 +211,26 @@ interface SolidRuntime {
   insert(parent: unknown, child: unknown): void
 }
 
+interface SolidCore {
+  createSignal<T>(value: T): [() => T, (next: T) => void]
+}
+
+async function loadSolidCore(): Promise<SolidCore | null> {
+  try {
+    const mod: unknown = await import('solid-js')
+    if (
+      typeof mod === 'object' &&
+      mod !== null &&
+      typeof (mod as SolidCore).createSignal === 'function'
+    ) {
+      return mod as SolidCore
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
 function materializeNode(node: ViewNode, solid: SolidRuntime): unknown {
   const element = solid.createElement(node.kind)
   for (const [name, value] of Object.entries(node.props)) {
@@ -246,26 +266,45 @@ const tuiModule = {
       return
     }
 
+    // Reactive updates need OpenCode's own solid-js instance (same one that
+    // drives the slot render effect). If it cannot be resolved, fall back to
+    // plain closures — the panel still renders, only live toggle redraw
+    // depends on requestRender re-invoking the slot.
+    const solidCore = await loadSolidCore()
+    const signal = <T>(value: T): [() => T, (next: T) => void] => {
+      if (solidCore) {
+        return solidCore.createSignal(value)
+      }
+      let current = value
+      return [
+        () => current,
+        (next: T) => {
+          current = next
+        },
+      ]
+    }
+
     const project = projectNameFromDirectory(String(api.state?.path?.directory ?? ''))
-    let collapsed = true
-    let currentView = await readMemView(project, collapsed)
-    let currentKey = viewKey(currentView)
+    const initialView = await readMemView(project, true)
+    const [collapsed, setCollapsed] = signal(true)
+    const [view, setView] = signal(initialView)
+    let currentKey = viewKey(initialView)
     let disposed = false
     let inFlight = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const refresh = async () => {
-      const nextView = await readMemView(project, collapsed)
+      const nextView = await readMemView(project, collapsed())
       const nextKey = viewKey(nextView)
       if (nextKey !== currentKey) {
-        currentView = nextView
         currentKey = nextKey
+        setView(nextView)
         api.renderer.requestRender()
       }
     }
 
     const onToggle = () => {
-      collapsed = !collapsed
+      setCollapsed(!collapsed())
       api.renderer.requestRender()
       void refresh().catch(() => {})
     }
@@ -274,7 +313,7 @@ const tuiModule = {
       order: 910,
       slots: {
         sidebar_content: () =>
-          materialize(buildMemNodes(currentView, api.theme.current, collapsed, onToggle), solid),
+          materialize(buildMemNodes(view(), api.theme.current, collapsed(), onToggle), solid),
       },
     })
     api.renderer.requestRender()
