@@ -1,7 +1,20 @@
 import { WorkerClient } from './worker-client'
 
 const POLL_INTERVAL_MS = 5000
-const LABEL_MAX = 28
+const LABEL_MAX = 40
+const RECENT_SUMMARIES = 3
+const RECENT_OBSERVATIONS = 3
+
+const OBSERVATION_TYPE_ICONS: Record<string, string> = {
+  bugfix: '●',
+  feature: '◆',
+  refactor: '↻',
+  change: '✓',
+  discovery: '○',
+  decision: '⚖',
+  security_alert: '⚠',
+  security_note: '⚷',
+}
 
 export interface MemSidebarView {
   readonly healthy: boolean
@@ -11,6 +24,8 @@ export interface MemSidebarView {
   readonly summaries: number | null
   readonly queueDepth: number | null
   readonly isProcessing: boolean
+  readonly recentSummaries: readonly { id: number; request: string }[]
+  readonly recentObservations: readonly { id: number; type: string; title: string }[]
 }
 
 interface ViewNode {
@@ -38,8 +53,21 @@ function text(props: Record<string, unknown>, value: string): ViewNode {
   return { kind: 'text', props, text: value }
 }
 
+const HTML_ENTITIES: Record<string, string> = {
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&#39;': "'",
+  '&amp;': '&',
+}
+
+function decodeEntities(value: string): string {
+  return value.replace(/&(?:lt|gt|quot|#39|amp);/g, (entity) => HTML_ENTITIES[entity] ?? entity)
+}
+
 function truncate(value: string): string {
-  return value.length <= LABEL_MAX ? value : `${value.slice(0, LABEL_MAX - 3)}...`
+  const decoded = decodeEntities(value)
+  return decoded.length <= LABEL_MAX ? decoded : `${decoded.slice(0, LABEL_MAX - 1)}…`
 }
 
 function formatCount(value: number | null): string {
@@ -49,32 +77,85 @@ function formatCount(value: number | null): string {
   return value >= 10000 ? `${(value / 1000).toFixed(1)}k` : String(value)
 }
 
-export function buildMemNodes(view: MemSidebarView, theme: Theme): ViewNode[] {
-  const rows: ViewNode[] = view.healthy
-    ? [
-        text({ fg: theme.success }, 'worker online'),
-        text({ fg: theme.text }, `project ${truncate(view.project)}`),
-        text(
-          { fg: theme.text },
-          `obs ${formatCount(view.observations)} · sum ${formatCount(view.summaries)}`
-        ),
-        text({ fg: theme.textMuted }, `sessions ${formatCount(view.sessions)}`),
-        ...(view.isProcessing || (view.queueDepth ?? 0) > 0
-          ? [text({ fg: theme.warning }, `processing · queue ${view.queueDepth ?? 0}`)]
-          : []),
-      ]
-    : [text({ fg: theme.error }, 'worker offline')]
+function summaryLine(view: MemSidebarView): { label: string; tone: 'ok' | 'warn' | 'err' } {
+  if (!view.healthy) {
+    return { label: '(offline)', tone: 'err' }
+  }
+  if (view.isProcessing || (view.queueDepth ?? 0) > 0) {
+    return { label: `(queue ${view.queueDepth ?? 0})`, tone: 'warn' }
+  }
+  return { label: `(online, ${formatCount(view.observations)} obs)`, tone: 'ok' }
+}
+
+function toneColor(tone: 'ok' | 'warn' | 'err', theme: Theme): string {
+  if (tone === 'err') {
+    return theme.error
+  }
+  return tone === 'warn' ? theme.warning : theme.textMuted
+}
+
+function bulletRow(icon: string, iconColor: string, label: string, theme: Theme): ViewNode {
+  return box({ flexDirection: 'row', gap: 1 }, [
+    text({ fg: iconColor, flexShrink: 0 }, icon),
+    text({ fg: theme.text, wrapMode: 'none' }, truncate(label)),
+  ])
+}
+
+function expandedRows(view: MemSidebarView, theme: Theme): ViewNode[] {
+  if (!view.healthy) {
+    return [bulletRow('•', theme.error, 'worker offline', theme)]
+  }
+
+  const rows: ViewNode[] = [
+    bulletRow(
+      '•',
+      theme.success,
+      `obs ${formatCount(view.observations)} · sum ${formatCount(view.summaries)} · ses ${formatCount(view.sessions)}`,
+      theme
+    ),
+  ]
+  if (view.isProcessing || (view.queueDepth ?? 0) > 0) {
+    rows.push(bulletRow('•', theme.warning, `processing · queue ${view.queueDepth ?? 0}`, theme))
+  }
+
+  if (view.recentSummaries.length > 0) {
+    rows.push(text({ fg: theme.textMuted }, 'Recent sessions'))
+    for (const summary of view.recentSummaries) {
+      rows.push(bulletRow('•', theme.textMuted, summary.request, theme))
+    }
+  }
+
+  if (view.recentObservations.length > 0) {
+    rows.push(text({ fg: theme.textMuted }, 'Latest'))
+    for (const observation of view.recentObservations) {
+      const icon = OBSERVATION_TYPE_ICONS[observation.type] ?? '○'
+      rows.push(bulletRow(icon, theme.info, observation.title, theme))
+    }
+  }
+
+  return rows
+}
+
+export function buildMemNodes(
+  view: MemSidebarView,
+  theme: Theme,
+  collapsed: boolean,
+  onToggle: () => void
+): ViewNode[] {
+  const summary = summaryLine(view)
+  const header = box({ flexDirection: 'row', gap: 1, onMouseDown: onToggle }, [
+    text({ fg: theme.text }, collapsed ? '▶' : '▼'),
+    text({ fg: theme.info }, 'Memory'),
+    ...(collapsed ? [text({ fg: toneColor(summary.tone, theme) }, summary.label)] : []),
+  ])
 
   return [
-    box(
-      {
-        borderStyle: 'single',
-        borderColor: theme.borderSubtle,
-        flexDirection: 'column',
-        padding: 1,
-      },
-      [text({ fg: theme.info }, 'Memory'), ...rows]
-    ),
+    box({ flexDirection: 'column', paddingTop: 1 }, [
+      header,
+      ...(collapsed
+        ? []
+        : [box({ flexDirection: 'column', paddingLeft: 2 }, expandedRows(view, theme))]),
+    ]),
   ]
 }
 
@@ -86,7 +167,7 @@ function readCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-export async function readMemView(project: string): Promise<MemSidebarView> {
+export async function readMemView(project: string, collapsed: boolean): Promise<MemSidebarView> {
   const stats = await WorkerClient.getStats()
   if (!stats) {
     return {
@@ -97,8 +178,20 @@ export async function readMemView(project: string): Promise<MemSidebarView> {
       summaries: null,
       queueDepth: null,
       isProcessing: false,
+      recentSummaries: [],
+      recentObservations: [],
     }
   }
+
+  // Recent items are only rendered when expanded — skip the extra requests
+  // while collapsed to keep the poll loop cheap.
+  const [recentSummaries, recentObservations] = collapsed
+    ? [[], []]
+    : await Promise.all([
+        WorkerClient.getRecentSummaries(project, RECENT_SUMMARIES),
+        WorkerClient.getRecentObservations(project, RECENT_OBSERVATIONS),
+      ])
+
   return {
     healthy: true,
     project,
@@ -107,6 +200,8 @@ export async function readMemView(project: string): Promise<MemSidebarView> {
     summaries: readCount(stats.database?.summaries),
     queueDepth: readCount(stats.processing?.queueDepth),
     isProcessing: stats.processing?.isProcessing === true,
+    recentSummaries,
+    recentObservations,
   }
 }
 
@@ -152,16 +247,34 @@ const tuiModule = {
     }
 
     const project = projectNameFromDirectory(String(api.state?.path?.directory ?? ''))
-    let currentView = await readMemView(project)
+    let collapsed = true
+    let currentView = await readMemView(project, collapsed)
     let currentKey = viewKey(currentView)
     let disposed = false
     let inFlight = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
+    const refresh = async () => {
+      const nextView = await readMemView(project, collapsed)
+      const nextKey = viewKey(nextView)
+      if (nextKey !== currentKey) {
+        currentView = nextView
+        currentKey = nextKey
+        api.renderer.requestRender()
+      }
+    }
+
+    const onToggle = () => {
+      collapsed = !collapsed
+      api.renderer.requestRender()
+      void refresh().catch(() => {})
+    }
+
     api.slots.register({
       order: 910,
       slots: {
-        sidebar_content: () => materialize(buildMemNodes(currentView, api.theme.current), solid),
+        sidebar_content: () =>
+          materialize(buildMemNodes(currentView, api.theme.current, collapsed, onToggle), solid),
       },
     })
     api.renderer.requestRender()
@@ -178,13 +291,7 @@ const tuiModule = {
       }
       inFlight = true
       try {
-        const nextView = await readMemView(project)
-        const nextKey = viewKey(nextView)
-        if (nextKey !== currentKey) {
-          currentView = nextView
-          currentKey = nextKey
-          api.renderer.requestRender()
-        }
+        await refresh()
       } catch {
         // never throw into the TUI loop
       } finally {
