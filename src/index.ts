@@ -1,5 +1,6 @@
 import { type Plugin, type PluginModule, tool } from '@opencode-ai/plugin'
 import { WorkerClient } from './worker-client'
+import { ensureTuiPluginEntry } from './tui-registration'
 
 const MAX_OBSERVATION_BYTES = 24 * 1024
 const MAX_TAG_REPLACEMENTS = 100
@@ -152,6 +153,8 @@ function extractTextFromParts(parts: any[]): string {
  */
 export const ClaudeMemPlugin: Plugin = async (ctx) => {
   const { project, directory, client } = ctx
+
+  ensureTuiPluginEntry()
 
   const projectRoot = directory || process.cwd()
   const projectName = project?.worktree
