@@ -3,9 +3,19 @@
 Persistent memory for [OpenCode](https://opencode.ai), powered by
 [Claude-Mem](https://github.com/thedotmack/claude-mem).
 
-Share the same Claude-Mem worker, database, and search tools between Claude Code
-and OpenCode. Once connected, previous observations and summaries are injected
-into new OpenCode sessions automatically.
+Share the same Claude-Mem worker, database, and memory across your coding
+agents: memories written by Claude Code are visible to OpenCode, and vice
+versa. Previous observations and summaries are injected into new OpenCode
+sessions automatically.
+
+```mermaid
+flowchart LR
+    CC[Claude Code] -->|writes as<br/>platform_source=claude| W
+    OC[OpenCode<br/>+ this plugin] -->|writes as<br/>platform_source=opencode| W
+    W[Claude-Mem Worker<br/>127.0.0.1:37777] --> DB[(SQLite +<br/>ChromaDB)]
+    W -->|shared project memory| CC
+    W -->|shared project memory| OC
+```
 
 > **Note:** This plugin is a thin OpenCode adapter for an existing Claude-Mem
 > installation. It does **not** install Claude-Mem, manage slash commands, or
@@ -23,106 +33,117 @@ into new OpenCode sessions automatically.
 ```
 
 3. Restart OpenCode.
-4. Start a session — memory context will be injected automatically when the
-   Claude-Mem worker is available.
+4. Start a session — memory context is injected automatically, the `mem-*`
+   tools become available, and a collapsible **Memory** section appears in the
+   sidebar.
 
-## Key Features
+Using [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)?
+See [Disable the Claude Code bridge](#using-with-oh-my-openagent-disable-the-claude-code-bridge)
+to avoid running two claude-mem integrations at once.
 
-- **Shared Memory** — Uses the same Claude-Mem worker and memory store as
-  Claude Code.
-- **Auto-Start** — When the plugin loads and the Claude-Mem worker is not
-  already running, it spawns `bunx claude-mem start` once per OpenCode process
-  (skipped silently if `bun` is not on `PATH` or the worker is already up).
-- **Automatic Context Injection** — Injects relevant project memory into the
-  system prompt for new OpenCode turns.
-- **Compaction Support** — Re-injects memory context during OpenCode session
-  compaction so long conversations keep their historical context.
-- **Observation Capture** — Sends tool observations to Claude-Mem for future
-  retrieval and summarization.
-- **Native Memory Tools** — Exposes `mem-search`, `mem-timeline`, and
-  `mem-get-observations` OpenCode tools backed by the Claude-Mem worker API,
-  covering the full search → timeline → details workflow without the Claude
-  Code compatibility bridge or an MCP server.
-- **Sidebar Status** — Registers a TUI sidebar panel ("Memory") showing worker
-  health, project, observation/summary/session counts, and processing queue
-  depth, refreshed every few seconds.
-- **Observation Hardening** — Skips low-value meta tools, strips
-  `<claude-mem-context>` and `<private>` tags before storage, and truncates
-  oversized observation payloads by UTF-8 byte size.
-- **Graceful Degradation** — If the worker is offline and cannot be started,
-  the plugin fails open and OpenCode continues to work normally.
+## What You Get
+
+| Surface | What it looks like |
+|---|---|
+| **System prompt** | `<claude-mem-context>` block with recent observations + session summaries for the current project |
+| **Tools** | `mem-search` → `mem-timeline` → `mem-get-observations` (full search workflow, no MCP server needed) |
+| **Sidebar** | `▶ Memory (online, 11.7k obs)` — click to expand recent sessions and latest observations |
+| **Background** | Every tool call, assistant message, and file edit captured as observations; sessions summarized on idle |
+
+### Sidebar
+
+The plugin registers a sidebar section styled after OpenCode's native
+MCP/Context sections — borderless, click-to-toggle:
+
+```text
+▶ Memory (online, 11.7k obs)          ← collapsed (default), single line
+```
+
+```text
+▼ Memory                              ← click header to expand
+  • obs 11.7k · sum 2311 · ses 1186
+  Recent sessions
+  • 实现 tui.json 自动注册（self-heal）机制…
+  • 设计 Memory 面板：跨工具记忆共享…
+  Latest
+  ◆ Memory 侧边栏完整通过 CI 流水线…
+  ● 修复点击不展开：改用 solid-js signal…
+  ⚖ 计划按原生风格重构 Memory 面板…
+```
+
+- Summary line turns **yellow** while the worker is processing (`(queue N)`)
+  and **red** when offline (`(offline)`).
+- Observation icons match the injected context legend: ◆ feature · ● bugfix ·
+  ⚖ decision · ○ discovery · ↻ refactor · ✓ change · ⚠/⚷ security.
+- Recent items are only fetched while expanded, keeping the collapsed poll
+  loop cheap (stats every 5s).
+- Fails open: worker offline → shows the offline state, never blocks the TUI.
+
+The sidebar loads via the package's `./tui` export. On startup the plugin
+**self-heals `~/.config/opencode/tui.json`**: if it is registered as a server
+plugin in `opencode.json` but missing from the TUI plugin list, it appends
+itself — no manual configuration. Symlinked `tui.json` files are written
+through, preserving dotfiles setups.
+
+### Memory Tools
+
+Three native OpenCode tools cover the same 3-step workflow as the upstream
+Claude-Mem MCP server — no MCP server or stdio subprocess required:
+
+```mermaid
+flowchart LR
+    A["mem-search<br/><i>find IDs by query</i>"] --> B["mem-timeline<br/><i>context around an ID</i>"]
+    B --> C["mem-get-observations<br/><i>full details for IDs</i>"]
+```
+
+| Tool | Worker endpoint | Use it for |
+|---|---|---|
+| `mem-search` | `GET /api/search` | Formatted index of matching observations (with IDs) |
+| `mem-timeline` | `GET /api/timeline` | Chronological records around an `anchor` ID (or auto-located via `query`) |
+| `mem-get-observations` | `POST /api/observations/batch` | Full details for IDs — e.g. the IDs shown in the injected context |
 
 ## How It Works
 
-```
-OpenCode session
-    |
-    |-- plugin loads
-    |   '-- connect to Claude-Mem worker from env/settings/default endpoint
-    |
-    |-- tool(mem-search) ............... search memory via worker API
-    |-- session.created ................ track session + reset cache
-    |-- chat.message ................... init session with real user prompt
-    |-- tool.execute.after ............. send tool observation
-    |-- system.transform ............... inject memory into system prompt
-    |-- session.compacting ............. preserve memory during compaction
-    |-- message.updated ................ capture assistant text (debounced)
-    |-- file.edited .................... record file edit observation
-    |-- session.compacted .............. summarize after compaction
-    |-- session.idle ................... flush + summarize
-    '-- session.deleted ................ flush + complete (no zombie sessions)
+```mermaid
+sequenceDiagram
+    participant OC as OpenCode
+    participant P as Plugin
+    participant W as Claude-Mem Worker
+
+    OC->>P: plugin loads
+    P->>P: self-heal tui.json
+    P->>W: health check (auto-start via bunx if down)
+    OC->>P: chat.message (first user prompt)
+    P->>W: POST /api/sessions/init
+    OC->>P: system.transform
+    W-->>P: GET /api/context/inject (cached per session)
+    P-->>OC: inject <claude-mem-context> into system prompt
+    loop during the session
+        OC->>P: tool.execute.after / message.updated / file.edited
+        P->>W: POST /api/sessions/observations
+    end
+    OC->>P: session.idle / session.compacted
+    P->>W: POST /api/sessions/summarize
+    OC->>P: session.deleted
+    P->>W: POST /api/sessions/complete
 ```
 
-The plugin is intentionally small. It only adapts OpenCode hook events to the
+The plugin is intentionally small: it only adapts OpenCode hook events to the
 Claude-Mem worker HTTP API. All indexing, summarization, memory search, and
 storage stay in upstream Claude-Mem.
 
-## Architecture
+### Cross-Tool Memory Sharing
 
-```
-OpenCode <-> Plugin (this repo) <-> Claude-Mem Worker <-> SQLite + ChromaDB
-```
+Writes are attributed (`platformSource: "opencode"`), reads are shared:
 
-The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
-`CLAUDE_MEM_WORKER_PORT` environment variables, then
-`~/.claude-mem/settings.json`, then `127.0.0.1:37777`.
+| Operation | Behavior |
+|---|---|
+| OpenCode writes | Stored as `platform_source=opencode` |
+| Claude Code writes | Stored as `platform_source=claude` |
+| Either reads (inject/search) | Sees **all** memory for the project, regardless of source |
 
-### Hook Mapping
-
-| Claude Code | OpenCode plugin | Purpose |
-|---|---|---|
-| `SessionStart` | `experimental.chat.system.transform` | Inject memory context |
-| `SessionStart` | `experimental.session.compacting` | Preserve memory during compaction |
-| `UserPromptSubmit` | `chat.message` | Initialize session with real user prompt |
-| `PostToolUse` | `tool.execute.after` | Capture tool observations |
-| Claude-Mem MCP `search` | `tool` (`mem-search`) | Search memory from OpenCode |
-| Claude-Mem MCP `timeline` | `tool` (`mem-timeline`) | Chronological context around an observation |
-| Claude-Mem MCP `get_observations` | `tool` (`mem-get-observations`) | Fetch full observation details by ID |
-| _(streaming)_ | `event` (`message.updated`) | Capture assistant text (debounced) |
-| _(streaming)_ | `event` (`file.edited`) | Record file edit observations |
-| _(compaction)_ | `event` (`session.compacted`) | Summarize after OpenCode compacts |
-| `Stop` | `event` (`session.idle`) | Flush + summarize |
-| `SessionEnd` | `event` (`session.deleted`) | Flush + complete (no zombie active rows) |
-
-### Worker API Endpoints Used
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| `GET` | `/api/health` | Health check |
-| `GET` | `/api/context/inject?project={name}` | Fetch formatted memory context |
-| `POST` | `/api/sessions/init` | Initialize session |
-| `POST` | `/api/sessions/observations` | Store tool observation |
-| `POST` | `/api/sessions/summarize` | Trigger summarization |
-| `POST` | `/api/sessions/complete` | Complete session |
-| `GET` | `/api/search?query={query}&project={name}` | Search memory |
-| `GET` | `/api/timeline?project={name}&anchor={id}` | Chronological context around an observation |
-| `POST` | `/api/observations/batch` | Fetch full observation details by ID |
-| `GET` | `/api/stats` + `/api/processing-status` | Sidebar status panel |
-| `GET` | `/api/summaries` + `/api/observations` | Sidebar recent items (expanded only) |
-
-Session and observation writes include `platformSource: "opencode"` so
-Claude-Mem can attribute new OpenCode memories separately from Claude Code,
-while context injection and `mem-search` still search the shared project memory.
+The sharing key is the **project name** (worktree directory name) — work in
+the same project directory and memory flows both ways.
 
 ## Installation
 
@@ -131,8 +152,7 @@ while context injection and `mem-search` still search the shared project memory.
 - [Claude Code](https://claude.com/claude-code) with
   [Claude-Mem](https://github.com/thedotmack/claude-mem) installed
 - [OpenCode](https://opencode.ai) with plugin support
-- A running Claude-Mem worker (default `127.0.0.1:37777`, or your
-  `CLAUDE_MEM_WORKER_HOST` / `CLAUDE_MEM_WORKER_PORT` settings)
+- A running Claude-Mem worker (default `127.0.0.1:37777`)
 
 ### Step 1: Install Claude-Mem
 
@@ -163,124 +183,115 @@ Then restart OpenCode.
 curl -s http://127.0.0.1:37777/api/health
 ```
 
-If the worker is healthy, OpenCode should show a toast like
-`Memory active · <project>` when a session starts.
+If the worker is healthy, OpenCode shows a toast like
+`Memory active · <project>` when a session starts, and the sidebar shows
+`▶ Memory (online, … obs)`.
 
-## Usage
+## Using with oh-my-openagent: Disable the Claude Code Bridge
 
-Once installed, the plugin works automatically:
+oh-my-openagent ships a Claude Code compatibility layer that can load Claude
+Code plugins — including `claude-mem@thedotmack` — inside OpenCode. Running
+that bridge **and** this native plugin at the same time means two integrations
+write to the same worker:
 
-- **Context injection** — Memory is injected into the system prompt on each LLM
-  call, with session-level caching to avoid repeated worker requests.
-- **Compaction preservation** — The same cached memory context is pushed into
-  OpenCode’s compaction path so memory survives conversation compression.
-- **Tool observation capture** — Tool executions are stored as observations,
-  except for low-value/meta tools and Claude-Mem search tools.
-- **Memory search** — The `mem-search` tool queries the worker's `/api/search`
-  endpoint for the current project.
-- **Assistant message capture** — Assistant text from `message.updated` is
-  buffered with 250ms debounce per session and sent as a single
-  `assistant_message` observation per turn (avoids streaming-chunk floods).
-- **File edit capture** — `file.edited` events are forwarded as `file_edit`
-  observations (path only; OpenCode does not include diff in the event).
-- **Session summarization** — On `session.compacted` and `session.idle`, the
-  plugin flushes any pending assistant buffer, fetches the latest user and
-  assistant messages, and asks Claude-Mem to summarize them.
-- **Session lifecycle hygiene** — On `session.deleted` the plugin tells the
-  worker to `completeSession`, preventing zombie `'active'` rows from
-  accumulating stale `pending_messages` (the "queueDepth never decreases"
-  failure mode).
+- duplicate observations for every tool call
+- duplicate context injection and toasts
+- bridged MCP tools (`search`, `timeline`, `get_observations`) shadowing the
+  native `mem-*` tools
 
-## Memory Tools
+Disable the bridge for claude-mem in `~/.config/opencode/oh-my-openagent.jsonc`:
 
-This plugin provides three native OpenCode tools backed by the Claude-Mem
-worker's HTTP API. They cover the same search → timeline → details workflow as
-the upstream Claude-Mem MCP server, without requiring an MCP server or the
-Claude Code compatibility bridge:
+```jsonc
+{
+  "claude_code": {
+    "plugins_override": {
+      "claude-mem@thedotmack": false
+    }
+  }
+}
+```
 
-- **`mem-search`** — `GET /api/search`. Returns a formatted index of matching
-  observations (with IDs) for the current project.
-- **`mem-timeline`** — `GET /api/timeline`. Given an observation ID as `anchor`
-  (or a `query` to locate one), returns the chronological records around it.
-- **`mem-get-observations`** — `POST /api/observations/batch`. Fetches full
-  observation details for a list of IDs (e.g. IDs surfaced in the injected
-  memory context or by `mem-search`).
+This only disables the *bridged* claude-mem inside OpenCode. Claude Code
+itself keeps using claude-mem normally, and memory stays shared through the
+worker. Everything the bridge provided is covered natively by this plugin:
 
-Claude Code's claude-mem plugin also registers an MCP server through its own
-`.mcp.json`. OpenCode does not automatically load Claude Code plugin MCP
-servers. If you previously saw Claude-Mem MCP tools in OpenCode, they were most
-likely supplied by a Claude Code compatibility bridge such as oh-my-openagent.
-Disabling that bridge for `claude-mem@thedotmack` removes those bridged MCP
-tools; the three `mem-*` tools above are the native replacements inside this
-plugin, so a separately configured MCP server is not required.
+| Bridged (before) | Native (this plugin) |
+|---|---|
+| MCP `search` | `mem-search` tool |
+| MCP `timeline` | `mem-timeline` tool |
+| MCP `get_observations` | `mem-get-observations` tool |
+| `SessionStart` context hook | `system.transform` injection |
+| `PostToolUse` observation hook | `tool.execute.after` capture |
 
-## Sidebar Status
+## Reference
 
-When running in the OpenCode TUI, the plugin registers a sidebar section titled
-**Memory** via its `./tui` export, styled after OpenCode's native MCP/Context
-sections: a borderless, click-to-toggle collapsible block.
+### Hook Mapping
 
-- **Collapsed (default)** — a single line: `▶ Memory (online, 11.7k obs)`.
-  The summary turns yellow when the worker is processing (`(queue N)`) and red
-  when it is offline (`(offline)`).
-- **Expanded** — click the header to expand: database counts, processing
-  status, the last 3 session summaries (`Recent sessions`), and the last 3
-  observations (`Latest`, with the same type icons used in the injected
-  context: ◆ feature, ● bugfix, ⚖ decision, ○ discovery, …).
+| Claude Code | OpenCode plugin | Purpose |
+|---|---|---|
+| `SessionStart` | `experimental.chat.system.transform` | Inject memory context |
+| `SessionStart` | `experimental.session.compacting` | Preserve memory during compaction |
+| `UserPromptSubmit` | `chat.message` | Initialize session with real user prompt |
+| `PostToolUse` | `tool.execute.after` | Capture tool observations |
+| Claude-Mem MCP `search` | `tool` (`mem-search`) | Search memory from OpenCode |
+| Claude-Mem MCP `timeline` | `tool` (`mem-timeline`) | Chronological context around an observation |
+| Claude-Mem MCP `get_observations` | `tool` (`mem-get-observations`) | Fetch full observation details by ID |
+| _(streaming)_ | `event` (`message.updated`) | Capture assistant text (debounced 250ms) |
+| _(streaming)_ | `event` (`file.edited`) | Record file edit observations |
+| _(compaction)_ | `event` (`session.compacted`) | Summarize after OpenCode compacts |
+| `Stop` | `event` (`session.idle`) | Flush + summarize |
+| `SessionEnd` | `event` (`session.deleted`) | Flush + complete (no zombie active rows) |
 
-Recent items are only fetched while expanded, so the collapsed poll loop stays
-cheap. The panel fails open — if the worker is offline it simply shows the
-offline state and never blocks the TUI. Requires OpenCode's `@opentui/solid`
-runtime; if that is unavailable the panel is skipped silently.
+### Worker API Endpoints Used
 
-The plugin also self-heals `~/.config/opencode/tui.json` on load (like
-oh-my-openagent does): if the plugin is registered as a server plugin in
-`opencode.json` but missing from the TUI plugin list, it appends itself so the
-sidebar loads without manual configuration. Symlinked `tui.json` files are
-written through, preserving dotfiles setups.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Health check |
+| `GET` | `/api/context/inject?project={name}` | Fetch formatted memory context |
+| `POST` | `/api/sessions/init` | Initialize session |
+| `POST` | `/api/sessions/observations` | Store tool observation |
+| `POST` | `/api/sessions/summarize` | Trigger summarization |
+| `POST` | `/api/sessions/complete` | Complete session |
+| `GET` | `/api/search?query={query}&project={name}` | `mem-search` |
+| `GET` | `/api/timeline?project={name}&anchor={id}` | `mem-timeline` |
+| `POST` | `/api/observations/batch` | `mem-get-observations` |
+| `GET` | `/api/stats` + `/api/processing-status` | Sidebar status |
+| `GET` | `/api/summaries` + `/api/observations` | Sidebar recent items (expanded only) |
 
-## Key Implementation Details
+The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
+`CLAUDE_MEM_WORKER_PORT` environment variables → `~/.claude-mem/settings.json`
+→ `127.0.0.1:37777`.
+
+### Key Implementation Details
 
 - **Thin client architecture** — `src/index.ts` handles OpenCode hooks and
-  session state; `src/worker-client.ts` is a static HTTP client.
-- **No console logging** — The plugin never writes to `console.*` because that
-  can corrupt the OpenCode TUI.
-- **Deferred toast** — Health toasts only happen after hook execution begins,
+  session state; `src/worker-client.ts` is a static HTTP client; `src/tui.ts`
+  renders the sidebar; `src/tui-registration.ts` self-heals `tui.json`.
+- **Zero runtime dependencies** — the OpenCode plugin SDK is bundled into
+  `dist/`, keeping the install footprint under ~500 KB.
+- **Reactive sidebar** — collapse state and view data are solid-js signals
+  (shared with OpenCode's own solid instance via `--external solid-js`), so
+  clicking the header re-renders reliably; falls back to plain closures if
+  solid-js cannot be resolved.
+- **No console logging** — `console.*` output corrupts the OpenCode TUI;
+  the plugin never logs and never throws from hooks.
+- **Deferred toast** — health toasts only happen after hook execution begins,
   avoiding startup crashes caused by early TUI access.
-- **Real prompt initialization** — `chat.message` sends the actual user prompt
-  to Claude-Mem instead of a synthetic placeholder.
-- **OpenCode attribution** — Session, observation, summarize, and complete
-  payloads include `platformSource: "opencode"`.
-- **Worker endpoint resolution** — The plugin reads `CLAUDE_MEM_WORKER_HOST` /
-  `CLAUDE_MEM_WORKER_PORT`, then `~/.claude-mem/settings.json`, then defaults to
-  `127.0.0.1:37777`.
-- **Real summarize payloads** — On `session.idle`, the plugin reads the latest
-  session messages and sends the last user and assistant messages for summary.
-- **Context caching** — Memory context is fetched once per session and reused
+- **Auto-start** — if the worker is down on load, spawns
+  `bunx claude-mem start` once per OpenCode process (skipped if `bun` is not
+  on `PATH`).
+- **Context caching** — memory context is fetched once per session and reused
   across prompt injection and compaction.
-- **Circular memory protection** — Injected context is wrapped in
-  `<claude-mem-context>` tags, Claude-Mem MCP search tools are skipped, and
-  memory-related tags are stripped before storing observations.
-- **UTF-8 truncation** — Large observation outputs are capped by byte size to
-  reduce token waste and avoid oversize worker payloads.
-- **Field name correctness** — Worker payloads use `contentSessionId`, not
-  `claudeSessionId`.
-- **PreToolUse file context** — Claude Code's native `PreToolUse Read`
-  `file-context` hook is not mirrored because the current OpenCode plugin
-  `tool.execute.before` API only lets plugins alter tool args; it has no channel
-  to inject extra LLM context before the tool call.
-
-## Differences from `bloodf/opencode-mem`
-
-This project intentionally stays smaller in scope.
-
-- **This plugin does**: bridge OpenCode hooks to an already-installed
-  Claude-Mem worker.
-- **This plugin does not**: auto-install Claude-Mem, auto-edit OpenCode config,
-  auto-copy skills, auto-register slash commands, or auto-start the worker.
-
-That keeps the runtime behavior predictable and leaves worker ownership with the
-upstream Claude-Mem installation.
+- **Circular memory protection** — injected context is wrapped in
+  `<claude-mem-context>` tags, Claude-Mem search tools are skipped from
+  observation capture, and memory tags are stripped before storage.
+- **Observation hardening** — low-value meta tools skipped; oversized payloads
+  truncated by UTF-8 byte size (24 KB cap).
+- **Field name correctness** — worker payloads use `contentSessionId`, not
+  `claudeSessionId` (the wrong name fails silently).
+- **Session lifecycle hygiene** — `session.deleted` triggers
+  `completeSession`, preventing zombie `active` rows from accumulating stale
+  `pending_messages`.
 
 ## Troubleshooting
 
@@ -297,49 +308,52 @@ curl -s http://127.0.0.1:37777/api/health
 
 ### OpenCode shows `Worker offline`
 
-The plugin will try to launch the worker via `bunx claude-mem start` once on
-plugin load. If that toast still appears:
+The plugin tries to launch the worker via `bunx claude-mem start` once on
+plugin load. If the toast still appears:
 
 - Confirm `bun` is on your `PATH` — `bun --version` should print a version.
-- Confirm `claude-mem` is installed for `bunx`/`npx` — run
+- Confirm `claude-mem` is installed for `bunx` — run
   `bunx claude-mem --version` once to populate the cache.
 - On Windows after a forced kill, port `37777` may stay in `TIME_WAIT` for
   30-120 seconds; wait it out or restart Claude Code.
 - Restart Claude Code to bring Claude-Mem back up via its own supervisor.
-- Verify the worker port is still `37777`.
 
-### OpenCode crashes on startup
+### Sidebar Memory section is missing
 
-- Update to a version with deferred TUI access.
-- Ensure there are no `console.log`, `console.warn`, or `console.error` calls in
-  local plugin modifications.
+- Check `~/.config/opencode/tui.json` contains this plugin in its `plugin`
+  array — the plugin self-heals this file on load, so restarting OpenCode
+  twice (once to heal, once to load) fixes a missing entry.
+- The sidebar requires OpenCode's `@opentui/solid` runtime; if unavailable the
+  section is skipped silently while hooks and tools keep working.
+
+### Clicking the Memory header does nothing
+
+- Upgrade to ≥ 0.4.2 — earlier versions used non-reactive state and the
+  toggle never re-rendered.
+
+### Duplicate observations / duplicate toasts
+
+- You are likely running both this plugin and a Claude Code compatibility
+  bridge for claude-mem. See
+  [Disable the Claude Code bridge](#using-with-oh-my-openagent-disable-the-claude-code-bridge).
 
 ### Observations are missing or incomplete
 
-- Ensure the worker API payload uses `contentSessionId`.
-- Be aware that low-value meta tools and Claude-Mem search tools are skipped by
-  design.
-- Very large tool outputs are truncated before storage.
-
-### Memory tools are unavailable
-
-- Use the built-in `mem-search`, `mem-timeline`, and `mem-get-observations`
-  tools exposed by this plugin — they cover the full Claude-Mem search workflow
-  natively, so a separate MCP server is not required.
-- If the tools return `worker is offline`, confirm the worker health endpoint
-  responds (see above).
+- Low-value meta tools and Claude-Mem search tools are skipped by design.
+- Very large tool outputs are truncated before storage (24 KB).
 
 ## Development
 
 ```bash
 bun install
-bun run build
-bun run lint
-bun run fmt:check
+bun run build       # bundle dist/index.js + dist/tui.js + emit declarations
+bun test            # bun's built-in runner
+bun run lint        # oxlint
+bun run fmt:check   # oxfmt
 ```
 
-If you edit source code locally, rebuild and restart OpenCode to pick up the new
-plugin bundle.
+If you edit source code locally, rebuild and restart OpenCode to pick up the
+new plugin bundle.
 
 ## License
 
