@@ -1,5 +1,5 @@
+import { buildSearchParams, parseWorkerEndpoint } from './worker-client'
 import { describe, expect, test } from 'bun:test'
-import { parseWorkerEndpoint } from './worker-client'
 
 describe('parseWorkerEndpoint', () => {
   test('returns the default endpoint when env and settings are empty', () => {
@@ -45,5 +45,45 @@ describe('parseWorkerEndpoint', () => {
     const endpoint = parseWorkerEndpoint({}, '{not json')
 
     expect(endpoint).toEqual({ host: '127.0.0.1', port: 37777 })
+  })
+})
+
+describe('buildSearchParams', () => {
+  test('forwards the complete worker search filter set', () => {
+    const options = {
+      query: 'TemplateEdit',
+      limit: 50,
+      project: 'vue-admin',
+      platformSource: 'opencode',
+      type: 'observations',
+      obs_type: 'feature,bugfix',
+      dateStart: '2026-07-17T00:00:00+08:00',
+      dateEnd: '2026-07-23T23:59:59+08:00',
+      offset: 20,
+      orderBy: 'date_desc' as const,
+    }
+
+    const params = buildSearchParams(options)
+
+    expect(params.toString()).toBe(
+      'query=TemplateEdit&limit=50&project=vue-admin&platformSource=opencode&type=observations&obs_type=feature%2Cbugfix&dateStart=2026-07-17T00%3A00%3A00%2B08%3A00&dateEnd=2026-07-23T23%3A59%3A59%2B08%3A00&offset=20&orderBy=date_desc'
+    )
+  })
+
+  test('supports date-only searches without a query', () => {
+    const params = buildSearchParams({
+      dateStart: '2026-07-17',
+      dateEnd: '2026-07-23',
+    })
+
+    expect(params.get('query')).toBe('')
+    expect(params.get('dateStart')).toBe('2026-07-17')
+    expect(params.get('dateEnd')).toBe('2026-07-23')
+  })
+
+  test('omits filters that were not provided', () => {
+    const params = buildSearchParams({ query: 'memory', project: 'Lark' })
+
+    expect([...params.keys()]).toEqual(['query', 'project'])
   })
 })

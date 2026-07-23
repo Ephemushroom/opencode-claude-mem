@@ -376,25 +376,79 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
   return {
     tool: {
       'mem-search': tool({
-        description: 'Search Claude-Mem persistent memory for this OpenCode project.',
+        description:
+          'Search Claude-Mem persistent memory. Supports query, project, platformSource, type, obs_type, dateStart, dateEnd, offset, and orderBy filters.',
         args: {
-          query: tool.schema.string().min(1).describe('Search query for Claude-Mem memory'),
+          query: tool.schema
+            .string()
+            .min(1)
+            .optional()
+            .describe('Optional semantic search query for Claude-Mem memory'),
           limit: tool.schema
             .number()
             .int()
             .positive()
-            .max(50)
+            .max(100)
             .optional()
-            .describe('Maximum number of search results'),
+            .describe('Maximum number of search results (default 20)'),
+          project: tool.schema.string().min(1).optional().describe('Filter by project name'),
+          platformSource: tool.schema
+            .string()
+            .min(1)
+            .optional()
+            .describe('Filter by platform source, such as claude or opencode'),
+          type: tool.schema.string().min(1).optional().describe('Filter by result type'),
+          obs_type: tool.schema
+            .string()
+            .min(1)
+            .optional()
+            .describe('Filter by observation type, such as feature or bugfix'),
+          dateStart: tool.schema
+            .string()
+            .min(1)
+            .optional()
+            .describe('Start date filter in ISO 8601 or YYYY-MM-DD format'),
+          dateEnd: tool.schema
+            .string()
+            .min(1)
+            .optional()
+            .describe('End date filter in ISO 8601 or YYYY-MM-DD format'),
+          offset: tool.schema.number().int().min(0).optional().describe('Pagination offset'),
+          orderBy: tool.schema
+            .enum(['date_desc', 'date_asc', 'relevance'])
+            .optional()
+            .describe('Sort order'),
         },
-        execute: async ({ query, limit }) => {
+        execute: async ({
+          query,
+          limit,
+          project: projectFilter,
+          platformSource,
+          type,
+          obs_type,
+          dateStart,
+          dateEnd,
+          offset,
+          orderBy,
+        }) => {
           const isHealthy = await checkWorkerAndToast()
           if (!isHealthy) {
             return 'Claude-Mem worker is offline. Start Claude-Mem and retry the search.'
           }
 
-          const result = await WorkerClient.search(query, projectName, limit)
-          return result || `No Claude-Mem results found for "${query}".`
+          const result = await WorkerClient.search({
+            query,
+            limit,
+            project: projectFilter ?? projectName,
+            platformSource,
+            type,
+            obs_type,
+            dateStart,
+            dateEnd,
+            offset,
+            orderBy,
+          })
+          return result || `No Claude-Mem results found${query ? ` for "${query}"` : ''}.`
         },
       }),
       'mem-timeline': tool({

@@ -30,6 +30,21 @@ export type AutoStartResult =
   | 'timeout'
   | 'skipped'
 
+export type SearchOrder = 'date_desc' | 'date_asc' | 'relevance'
+
+export interface SearchOptions {
+  readonly query?: string
+  readonly limit?: number
+  readonly project?: string
+  readonly platformSource?: string
+  readonly type?: string
+  readonly obs_type?: string
+  readonly dateStart?: string
+  readonly dateEnd?: string
+  readonly offset?: number
+  readonly orderBy?: SearchOrder
+}
+
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -78,6 +93,30 @@ export function parseWorkerEndpoint(
     DEFAULT_WORKER_PORT
 
   return { host, port }
+}
+
+export function buildSearchParams(options: SearchOptions): URLSearchParams {
+  const params = new URLSearchParams()
+  const entries: readonly (readonly [string, string | number | undefined])[] = [
+    ['query', options.query ?? ''],
+    ['limit', options.limit],
+    ['project', options.project],
+    ['platformSource', options.platformSource],
+    ['type', options.type],
+    ['obs_type', options.obs_type],
+    ['dateStart', options.dateStart],
+    ['dateEnd', options.dateEnd],
+    ['offset', options.offset],
+    ['orderBy', options.orderBy],
+  ]
+
+  for (const [key, value] of entries) {
+    if (value !== undefined) {
+      params.set(key, String(value))
+    }
+  }
+
+  return params
 }
 
 function readSettingsRaw(): string | null {
@@ -538,12 +577,9 @@ export class WorkerClient {
     }
   }
 
-  static async search(query: string, project: string, limit?: number): Promise<string> {
+  static async search(options: SearchOptions): Promise<string> {
     try {
-      const params = new URLSearchParams({ query, project })
-      if (limit !== undefined) {
-        params.set('limit', String(limit))
-      }
+      const params = buildSearchParams(options)
 
       const response = await fetch(`${this.BASE_URL}/api/search?${params.toString()}`)
       if (!response.ok) {
