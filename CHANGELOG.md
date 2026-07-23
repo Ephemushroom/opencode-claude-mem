@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-23
+
+### Added
+
+- Expanded the native `mem-search` tool to expose Claude-Mem's complete worker
+  search filters: `project`, `platformSource`, `type`, `obs_type`, `dateStart`,
+  `dateEnd`, `offset`, and `orderBy`.
+- Added coverage for full parameter forwarding and date-only searches.
+
+### Fixed
+
+- Encode a missing search query as `query=` so date-only and filter-only searches
+  work with Claude-Mem worker `13.11.0`.
+
+### Documentation
+
+- Documented the expanded `mem-search` contract and worker query parameters.
+
 ## [0.3.0] - 2026-05-07
 
 ### Added
