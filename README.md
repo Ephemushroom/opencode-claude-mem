@@ -98,7 +98,7 @@ flowchart LR
 
 | Tool | Worker endpoint | Use it for |
 |---|---|---|
-| `mem-search` | `GET /api/search` | Formatted index of matching observations (with IDs) |
+| `mem-search` | `GET /api/search` | Formatted index with query, project, source, type, date, pagination, and ordering filters |
 | `mem-timeline` | `GET /api/timeline` | Chronological records around an `anchor` ID (or auto-located via `query`) |
 | `mem-get-observations` | `POST /api/observations/batch` | Full details for IDs — e.g. the IDs shown in the injected context |
 
@@ -252,7 +252,7 @@ worker. Everything the bridge provided is covered natively by this plugin:
 | `POST` | `/api/sessions/observations` | Store tool observation |
 | `POST` | `/api/sessions/summarize` | Trigger summarization |
 | `POST` | `/api/sessions/complete` | Complete session |
-| `GET` | `/api/search?query={query}&project={name}` | `mem-search` |
+| `GET` | `/api/search?query=...&project=...&dateStart=...&dateEnd=...` | `mem-search`; also supports `limit`, `platformSource`, `type`, `obs_type`, `offset`, and `orderBy` |
 | `GET` | `/api/timeline?project={name}&anchor={id}` | `mem-timeline` |
 | `POST` | `/api/observations/batch` | `mem-get-observations` |
 | `GET` | `/api/stats` + `/api/processing-status` | Sidebar status |

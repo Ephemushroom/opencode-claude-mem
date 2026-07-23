@@ -150,7 +150,7 @@ Hook handlers available:
 - **Deferred toast**: Never call `client.tui.showToast()` during plugin init — TUI isn't ready, crashes OpenCode
 - **Idempotent init**: `ensureSessionInit()` tracks initialized sessions in a `Set` — safe to call repeatedly
 - **Context caching**: `getCachedContext()` fetches context once per OpenCode session and resets on `session.created`
-- **Search tool**: `mem-search` calls `/api/search?query=...&project=...` and is skipped by observation capture
+- **Search tool**: `mem-search` forwards the worker search contract (`query`, `limit`, `project`, `platformSource`, `type`, `obs_type`, `dateStart`, `dateEnd`, `offset`, `orderBy`) and is skipped by observation capture
 - **MCP boundary**: Claude Code plugin MCP is not automatically available in OpenCode; configure MCP separately if `timeline`/`get_observations` are needed
 
 ## Worker API Endpoints
@@ -165,7 +165,7 @@ Calls go to the resolved Claude-Mem worker endpoint:
 | POST   | `/api/sessions/observations`      | Send tool observation      |
 | POST   | `/api/sessions/summarize`         | Trigger summarization      |
 | POST   | `/api/sessions/complete`          | Complete session           |
-| GET    | `/api/search?query=...&project=...` | Search memory            |
+| GET    | `/api/search?query=...&project=...&dateStart=...&dateEnd=...` | Search memory with full filters |
 
 ## File Structure
 
