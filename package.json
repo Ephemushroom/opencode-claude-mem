@@ -53,10 +53,10 @@
     "access": "public"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.3.0",
+    "@opencode-ai/plugin": "^1.14.41",
     "@types/bun": "latest",
     "oxfmt": "^0.33.0",
-    "oxlint": "^1.48.0",
-    "typescript": "^5.0.0"
+    "oxlint": "^1.63.0",
+    "typescript": "^5.9.3"
   }
 }
