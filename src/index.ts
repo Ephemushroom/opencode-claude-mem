@@ -312,7 +312,19 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     }
 
     try {
-      await WorkerClient.sessionInit(sessionId, projectName, prompt || 'SESSION_START')
+      // Only treat the session as initialized when the worker actually
+      // persisted it. sessionInit returns null on any failure (worker
+      // mid-boot, non-200, network error) — marking it initialized anyway
+      // would skip the init retry forever, leaving user_prompts empty and
+      // repeating "no user_prompts row for prompt #0" on every observation.
+      const result = await WorkerClient.sessionInit(
+        sessionId,
+        projectName,
+        prompt || 'SESSION_START'
+      )
+      if (!result) {
+        return false
+      }
       initializedSessions.add(sessionId)
       currentSessionId = sessionId
       return true
