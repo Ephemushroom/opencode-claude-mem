@@ -8,7 +8,14 @@ bridges OpenCode hooks to the Claude-Mem worker service.
 - **Runtime**: Bun
 - **Language**: TypeScript (strict mode)
 - **Package manager**: Bun (`bun install`, lockfile: `bun.lock`)
-- **Entry point**: `src/index.ts` (plugin factory), `src/worker-client.ts` (HTTP client)
+- **Entry points**:
+  - `src/index.ts` — OpenCode **V1** plugin (default export `{ server }`)
+  - `src/v2.ts` — OpenCode **V2** plugin (`Plugin.define` via `@opencode-ai/plugin-v2/promise/plugin`)
+  - `src/tui.ts` — OpenCode **V1** TUI plugin (Memory sidebar, `{ id, tui }`)
+  - `src/cli.ts` — OpenCode **V2** TUI plugin (Memory sidebar, `Plugin.define` via `@opencode-ai/plugin-v2/tui/plugin`)
+  - `src/worker-client.ts` — HTTP client (shared by all entrypoints)
+  - `src/sidebar-model.ts` — pure sidebar view model shared by both TUI entrypoints
+  - `src/shared.ts` — pure helpers shared by the server entrypoints
 - **Output**: `dist/` (compiled JS + declarations)
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`, `.github/workflows/release.yml`)
 
@@ -130,17 +137,60 @@ throw error                       // breaks OpenCode
 
 ### Plugin Architecture
 
-The plugin exports a single async factory function (`ClaudeMemPlugin`) that:
+Two entrypoints exist — one per OpenCode runtime (they are API-incompatible):
+
+**V1 (`src/index.ts`)** — exports a single async factory function
+(`ClaudeMemPlugin`) that:
 1. Receives context (`project`, `directory`, `client`)
 2. Sets up internal state (session tracking, caches)
 3. Returns an object of hook handlers
 
-Hook handlers available:
+V1 hook handlers:
 - `event` — session lifecycle (`session.created`, `session.idle`)
 - `chat.message` — session init with real user prompt
 - `experimental.chat.system.transform` — inject memory into system prompt
 - `tool.execute.after` — capture tool observations
 - `tool` — custom tool definitions (`mem-search`)
+
+**V2 (`src/v2.ts`)** — `Plugin.define({ id: 'claude-mem', setup })` via
+`@opencode-ai/plugin-v2/promise/plugin` (deep import — the root entry pulls in
+effect/schema, the deep path bundles to ~28 KB). Setup registers:
+- `ctx.session.hook('context')` — init session with real user prompt (from
+  `event.messages`) + push `<claude-mem-context>` SystemPart into `event.system`
+- `ctx.tool.hook('execute.after')` — capture tool observations (`event.result`
+  on `status: 'completed'`, `event.error` on `'error'`)
+- `ctx.tool.transform((tools) => tools.add(...))` — the `mem-*` tools with
+  `options: { codemode: false }` (exposed directly to the provider)
+- `ctx.event.subscribe()` — detached async loop (never awaited in setup, retried
+  on disconnect after `EVENT_RETRY_DELAY_MS`); assistant text comes from
+  `session.text.ended` (complete text, no debounce needed), summarization on
+  `session.execution.succeeded` / `session.compaction.ended`, completion on
+  `session.deleted`
+
+V2 has no `client.tui` — there is no toast API; skip toasts entirely.
+
+**V2 TUI (`src/cli.ts`)** — `Plugin.define({ id: 'claude-mem.tui', setup })`
+via `@opencode-ai/plugin-v2/tui/plugin`. Loaded from `~/.config/opencode/cli.json`
+`plugins` array as `@ephemushroom/opencode-claude-mem/cli`. Renders the
+Memory sidebar into the `sidebar.content` slot:
+- Element model: imperative `@opentui/solid` `createElement`/`setProp`/`insert`
+  (same as V1), dynamic-imported at setup with a graceful null fallback
+- State: `ctx.storage.memory('claude-mem.sidebar', ...)` — solid Store read
+  inside the slot render so mutations re-render reactively
+- Poll: 5s interval via `readMemView` (shared model); immediate refresh on
+  `session.created` / `session.execution.succeeded` via `ctx.data.on`
+- One-time offline warning toast via `ctx.ui.toast.show`
+- Setup returns a cleanup (timer, slot disposer, event disposers)
+- `@opentui/solid` is a real runtime `dependency` (OpenCode installs plugin
+  deps into an isolated cache) but is also dynamic-imported defensively
+
+Both entrypoints share `WorkerClient` and pure helpers in `src/shared.ts`
+(sanitization, truncation, skip lists, text extraction). V2 state is keyed per
+session (`sessionDirs`, `contextCache`, `sessionUserTexts`,
+`sessionAssistantTexts` maps) because the V2 server hosts multiple sessions.
+The sidebar view model (stats + rows) lives in `src/sidebar-model.ts`, shared
+by `tui.ts` (V1) and `cli.ts` (V2); themes map V2 `ResolvedTheme` RGBA
+tokens onto the model's `Theme` interface.
 
 ### Critical Implementation Details
 
@@ -171,8 +221,14 @@ Calls go to the resolved Claude-Mem worker endpoint:
 
 ```
 src/
-  index.ts          — Plugin entry: hooks, toast, session management
+  index.ts          — OpenCode V1 plugin entry: hooks, toast, session management
+  v2.ts             — OpenCode V2 plugin entry: Plugin.define setup + event loop
+  tui.ts            — OpenCode V1 TUI plugin (Memory sidebar, { id, tui })
+  cli.ts            — OpenCode V2 TUI plugin (Memory sidebar, Plugin.define)
+  sidebar-model.ts  — Pure sidebar view model shared by tui.ts and cli.ts
+  shared.ts         — Pure helpers shared by the server entrypoints
   worker-client.ts  — Static HTTP client for Claude-Mem worker API
+  tui-registration.ts — tui.json (V1) + cli.json (V2) sidebar self-heal
 dist/               — Build output (gitignored)
 ```
 

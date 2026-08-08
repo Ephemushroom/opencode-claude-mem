@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 const PACKAGE_NAME = '@ephemushroom/opencode-claude-mem'
+const CLI_ENTRY = `${PACKAGE_NAME}/cli`
 
 export type TuiRegistrationResult =
   | 'added'
@@ -35,8 +36,17 @@ function pluginEntries(config: Record<string, unknown>): string[] {
   return plugin.filter((entry): entry is string => typeof entry === 'string')
 }
 
+function v2PluginEntries(config: Record<string, unknown>): unknown[] {
+  const { plugins } = config
+  return Array.isArray(plugins) ? plugins : []
+}
+
 function isOwnEntry(entry: string): boolean {
-  return entry === PACKAGE_NAME || entry.startsWith(`${PACKAGE_NAME}@`)
+  return (
+    entry === PACKAGE_NAME ||
+    entry.startsWith(`${PACKAGE_NAME}@`) ||
+    entry.startsWith(`${PACKAGE_NAME}/`)
+  )
 }
 
 function findServerEntry(configDir: string): string | null {
@@ -84,6 +94,39 @@ export function ensureTuiPluginEntry(): TuiRegistrationResult {
     mkdirSync(configDir, { recursive: true })
     const next = { ...config, plugin: [...plugins, serverEntry] }
     writeFileSync(tuiJsonPath, `${JSON.stringify(next, null, 2)}\n`)
+    return 'added'
+  } catch {
+    return 'failed'
+  }
+}
+
+/**
+ * V2 self-heal: register the V2 CLI entry in `~/.config/opencode/cli.json`
+ * (the V2 CLI/TUI config file) so the Memory sidebar loads in the V2 TUI
+ * without manual configuration. The CLI writes strict JSON (2-space indent),
+ * so a comment-bearing file is left untouched ('malformed').
+ */
+export function ensureCliPluginEntry(): TuiRegistrationResult {
+  try {
+    const configDir = getConfigDir()
+    const cliJsonPath = join(configDir, 'cli.json')
+    let config: Record<string, unknown> = {}
+    if (existsSync(cliJsonPath)) {
+      const parsed = readJson(cliJsonPath)
+      if (!parsed) {
+        return 'malformed'
+      }
+      config = parsed
+    }
+
+    const plugins = v2PluginEntries(config)
+    if (plugins.some((entry) => typeof entry === 'string' && isOwnEntry(entry))) {
+      return 'already-present'
+    }
+
+    mkdirSync(configDir, { recursive: true })
+    const next = { ...config, plugins: [...plugins, CLI_ENTRY] }
+    writeFileSync(cliJsonPath, `${JSON.stringify(next, null, 2)}\n`)
     return 'added'
   } catch {
     return 'failed'

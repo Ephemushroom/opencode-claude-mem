@@ -24,7 +24,10 @@ flowchart LR
 ## Quick Start
 
 1. Install and configure Claude-Mem in Claude Code.
-2. Add this plugin to your `opencode.json`:
+2. Add this plugin to your `opencode.json` — pick the section matching your
+   OpenCode version:
+
+### OpenCode 1
 
 ```json
 {
@@ -32,14 +35,55 @@ flowchart LR
 }
 ```
 
+### OpenCode 2
+
+```json
+{
+  "plugins": ["@ephemushroom/opencode-claude-mem/v2"]
+}
+```
+
 3. Restart OpenCode.
 4. Start a session — memory context is injected automatically, the `mem-*`
    tools become available, and a collapsible **Memory** section appears in the
-   sidebar.
+   sidebar (both versions).
 
 Using [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)?
 See [Disable the Claude Code bridge](#using-with-oh-my-openagent-disable-the-claude-code-bridge)
 to avoid running two claude-mem integrations at once.
+
+## OpenCode 1 and 2
+
+OpenCode 1 and OpenCode 2 install side by side (`opencode` vs `opencode2`) and
+their plugin APIs are incompatible — **V1 plugins do not load in V2**. This
+package ships both entrypoints in the same npm package, so each runtime loads
+only its own:
+
+| | OpenCode 1 | OpenCode 2 |
+|---|---|---|
+| **Binary** | `opencode` | `opencode2` |
+| **Server plugin config** | `opencode.json` → `plugin` | `opencode.json` → `plugins` |
+| **Server plugin entry** | `@ephemushroom/opencode-claude-mem` | `@ephemushroom/opencode-claude-mem/v2` |
+| **Sidebar config** | `~/.config/opencode/tui.json` → `plugin` (self-healed) | `~/.config/opencode/cli.json` → `plugins` (self-healed) |
+| **Sidebar entry** | package `./tui` export | package `./cli` export |
+
+Both adapters talk to the same Claude-Mem worker, so memory written from V1,
+V2, and Claude Code is shared. The V2 entrypoint covers the same behavior —
+context injection, tool observation capture, the `mem-search`/`mem-timeline`/
+`mem-get-observations` tools, session init/summarize/complete via the event
+stream.
+
+In V2, installing the server plugin
+(`"plugins": ["@ephemushroom/opencode-claude-mem/v2"]`) auto-appends
+`@ephemushroom/opencode-claude-mem/cli` to the `plugins` array in
+`~/.config/opencode/cli.json` on first load — no manual step. To register
+manually, add it yourself:
+
+```json
+{
+  "plugins": ["@ephemushroom/opencode-claude-mem/cli"]
+}
+```
 
 ## What You Get
 
@@ -79,11 +123,14 @@ MCP/Context sections — borderless, click-to-toggle:
   loop cheap (stats every 5s).
 - Fails open: worker offline → shows the offline state, never blocks the TUI.
 
-The sidebar loads via the package's `./tui` export. On startup the plugin
-**self-heals `~/.config/opencode/tui.json`**: if it is registered as a server
-plugin in `opencode.json` but missing from the TUI plugin list, it appends
-itself — no manual configuration. Symlinked `tui.json` files are written
-through, preserving dotfiles setups.
+The sidebar loads via the package's `./tui` export (OpenCode 1) or `./cli`
+export (OpenCode 2 — registered in `~/.config/opencode/cli.json`). On startup
+the plugin **self-heals the TUI config**: if it is registered as a server
+plugin but missing from the TUI plugin list, it appends itself — no manual
+configuration. OpenCode 1 writes into `tui.json` (symlinked files are written
+through, preserving dotfiles setups); OpenCode 2 appends
+`@ephemushroom/opencode-claude-mem/cli` to `cli.json`'s `plugins` array
+(comment-bearing files are left untouched).
 
 ### Memory Tools
 
@@ -111,18 +158,18 @@ sequenceDiagram
     participant W as Claude-Mem Worker
 
     OC->>P: plugin loads
-    P->>P: self-heal tui.json
+    P->>P: self-heal tui.json / cli.json
     P->>W: health check (auto-start via bunx if down)
-    OC->>P: chat.message (first user prompt)
+    OC->>P: first user prompt (chat.message / context hook)
     P->>W: POST /api/sessions/init
-    OC->>P: system.transform
+    OC->>P: system prompt transform / context hook
     W-->>P: GET /api/context/inject (cached per session)
     P-->>OC: inject <claude-mem-context> into system prompt
     loop during the session
-        OC->>P: tool.execute.after / message.updated / file.edited
+        OC->>P: tool.execute.after / assistant text / file.edited
         P->>W: POST /api/sessions/observations
     end
-    OC->>P: session.idle / session.compacted
+    OC->>P: session idle / execution succeeded / compaction ended
     P->>W: POST /api/sessions/summarize
     OC->>P: session.deleted
     P->>W: POST /api/sessions/complete
@@ -131,6 +178,25 @@ sequenceDiagram
 The plugin is intentionally small: it only adapts OpenCode hook events to the
 Claude-Mem worker HTTP API. All indexing, summarization, memory search, and
 storage stay in upstream Claude-Mem.
+
+### Hook Mapping (V1 ↔ V2)
+
+The V1 and V2 entrypoints adapt the same behavior onto two different plugin
+APIs:
+
+| Behavior | OpenCode 1 | OpenCode 2 |
+|---|---|---|
+| Inject memory context | `experimental.chat.system.transform` | `ctx.session.hook('context')` |
+| Preserve memory on compaction | `experimental.session.compacting` | _(context hook re-runs per dispatch)_ |
+| Session init with user prompt | `chat.message` | `ctx.session.hook('context')` (from `event.messages`) |
+| Capture tool observations | `tool.execute.after` | `ctx.tool.hook('execute.after')` |
+| Custom memory tools | `tool` (`mem-search`, …) | `ctx.tool.transform` (`tools.add`) |
+| Assistant text capture | `event` (`message.updated`, debounced 250ms) | `session.text.ended` event (complete text) |
+| File edit observations | `event` (`file.edited`) | `ctx.tool.hook('execute.after')` |
+| Summarize on idle | `event` (`session.idle`) | `session.execution.succeeded` event |
+| Summarize after compaction | `event` (`session.compacted`) | `session.compaction.ended` event |
+| Complete session | `event` (`session.deleted`) | `session.deleted` event |
+| Sidebar slot | `api.slots.register` (`sidebar_content`) | `ctx.ui.slot('sidebar.content')` |
 
 ### Cross-Tool Memory Sharing
 
@@ -169,11 +235,24 @@ Restart Claude Code so the worker can start and initialize its data directory.
 
 Add this plugin to your project or global `opencode.json`:
 
+**OpenCode 1** (`opencode`):
+
 ```json
 {
   "plugin": ["@ephemushroom/opencode-claude-mem"]
 }
 ```
+
+**OpenCode 2** (`opencode2`):
+
+```json
+{
+  "plugins": ["@ephemushroom/opencode-claude-mem/v2"]
+}
+```
+
+The two runtimes can be installed side by side and load their own entrypoint —
+V1 plugins do not load in V2 and vice versa.
 
 Then restart OpenCode.
 
@@ -183,9 +262,9 @@ Then restart OpenCode.
 curl -s http://127.0.0.1:37777/api/health
 ```
 
-If the worker is healthy, OpenCode shows a toast like
-`Memory active · <project>` when a session starts, and the sidebar shows
-`▶ Memory (online, … obs)`.
+If the worker is healthy, the sidebar shows `▶ Memory (online, … obs)`.
+OpenCode 1 also shows a `Memory active · <project>` toast when a session
+starts (OpenCode 2 only toasts a warning when the worker is offline).
 
 ## Using with oh-my-openagent: Disable the Claude Code Bridge
 
@@ -227,20 +306,23 @@ worker. Everything the bridge provided is covered natively by this plugin:
 
 ### Hook Mapping
 
-| Claude Code | OpenCode plugin | Purpose |
+Claude Code hooks → this plugin's adapters (see [Hook Mapping (V1 ↔ V2)](#hook-mapping-v1--v2)
+for the per-runtime API):
+
+| Claude Code | OpenCode (both runtimes) | Purpose |
 |---|---|---|
-| `SessionStart` | `experimental.chat.system.transform` | Inject memory context |
-| `SessionStart` | `experimental.session.compacting` | Preserve memory during compaction |
-| `UserPromptSubmit` | `chat.message` | Initialize session with real user prompt |
-| `PostToolUse` | `tool.execute.after` | Capture tool observations |
-| Claude-Mem MCP `search` | `tool` (`mem-search`) | Search memory from OpenCode |
-| Claude-Mem MCP `timeline` | `tool` (`mem-timeline`) | Chronological context around an observation |
-| Claude-Mem MCP `get_observations` | `tool` (`mem-get-observations`) | Fetch full observation details by ID |
-| _(streaming)_ | `event` (`message.updated`) | Capture assistant text (debounced 250ms) |
-| _(streaming)_ | `event` (`file.edited`) | Record file edit observations |
-| _(compaction)_ | `event` (`session.compacted`) | Summarize after OpenCode compacts |
-| `Stop` | `event` (`session.idle`) | Flush + summarize |
-| `SessionEnd` | `event` (`session.deleted`) | Flush + complete (no zombie active rows) |
+| `SessionStart` | system prompt injection (`system.transform` / `context` hook) | Inject memory context |
+| `SessionStart` | compaction injection (`session.compacting` / context hook) | Preserve memory during compaction |
+| `UserPromptSubmit` | session init (`chat.message` / context hook) | Initialize session with real user prompt |
+| `PostToolUse` | observation capture (`tool.execute.after` / `execute.after` hook) | Capture tool observations |
+| Claude-Mem MCP `search` | `mem-search` tool | Search memory from OpenCode |
+| Claude-Mem MCP `timeline` | `mem-timeline` tool | Chronological context around an observation |
+| Claude-Mem MCP `get_observations` | `mem-get-observations` tool | Fetch full observation details by ID |
+| _(streaming)_ | assistant text (`message.updated` / `session.text.ended`) | Capture assistant text |
+| _(streaming)_ | file edits (`file.edited` / tool hook) | Record file edit observations |
+| _(compaction)_ | `session.compacted` / `session.compaction.ended` | Summarize after OpenCode compacts |
+| `Stop` | `session.idle` / `session.execution.succeeded` | Flush + summarize |
+| `SessionEnd` | `session.deleted` | Flush + complete (no zombie active rows) |
 
 ### Worker API Endpoints Used
 
@@ -264,11 +346,16 @@ The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
 
 ### Key Implementation Details
 
-- **Thin client architecture** — `src/index.ts` handles OpenCode hooks and
-  session state; `src/worker-client.ts` is a static HTTP client; `src/tui.ts`
-  renders the sidebar; `src/tui-registration.ts` self-heals `tui.json`.
-- **Zero runtime dependencies** — the OpenCode plugin SDK is bundled into
-  `dist/`, keeping the install footprint under ~500 KB.
+- **Dual-runtime architecture** — `src/index.ts` is the OpenCode 1 plugin,
+  `src/v2.ts` the OpenCode 2 plugin (`Plugin.define`), `src/tui.ts` the V1
+  sidebar, `src/cli.ts` the V2 sidebar; `src/shared.ts` and
+  `src/sidebar-model.ts` hold the shared pure helpers; `src/worker-client.ts`
+  is a static HTTP client; `src/tui-registration.ts` self-heals `tui.json`
+  (V1) and `cli.json` (V2).
+- **Zero runtime dependencies for server plugins** — the OpenCode plugin SDK
+  is bundled into `dist/` (V1 `index.js` ~480 KB, V2 `v2.js` ~30 KB via a deep
+  `@opencode-ai/plugin` import that skips effect). The TUI entrypoints keep
+  `@opentui/solid` external (provided by the host TUI).
 - **Reactive sidebar** — collapse state and view data are solid-js signals
   (shared with OpenCode's own solid instance via `--external solid-js`), so
   clicking the header re-renders reliably; falls back to plain closures if
@@ -320,9 +407,13 @@ plugin load. If the toast still appears:
 
 ### Sidebar Memory section is missing
 
-- Check `~/.config/opencode/tui.json` contains this plugin in its `plugin`
-  array — the plugin self-heals this file on load, so restarting OpenCode
-  twice (once to heal, once to load) fixes a missing entry.
+- **OpenCode 1**: check `~/.config/opencode/tui.json` contains this plugin in
+  its `plugin` array — the plugin self-heals this file on load, so restarting
+  OpenCode twice (once to heal, once to load) fixes a missing entry.
+- **OpenCode 2**: check `~/.config/opencode/cli.json` contains
+  `@ephemushroom/opencode-claude-mem/cli` in its `plugins` array — self-healed
+  the same way (comment-bearing cli.json files are left untouched, so remove
+  the comments or add the entry manually).
 - The sidebar requires OpenCode's `@opentui/solid` runtime; if unavailable the
   section is skipped silently while hooks and tools keep working.
 
@@ -346,7 +437,7 @@ plugin load. If the toast still appears:
 
 ```bash
 bun install
-bun run build       # bundle dist/index.js + dist/tui.js + emit declarations
+bun run build       # bundle dist/{index,v2,tui,cli}.js + emit declarations
 bun test            # bun's built-in runner
 bun run lint        # oxlint
 bun run fmt:check   # oxfmt
