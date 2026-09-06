@@ -1,15 +1,16 @@
-import { define } from '@opencode-ai/plugin-v2/tui/plugin'
-import type { ResolvedTheme } from '@opencode-ai/theme/tui'
-import type { JSX } from '@opentui/solid'
+import type * as Solid from '@opentui/solid'
 import {
-  POLL_INTERVAL_MS,
   type MemSidebarView,
+  POLL_INTERVAL_MS,
   type Theme,
+  type ViewNode,
   buildMemNodes,
   readMemView,
   viewKey,
-  type ViewNode,
 } from './sidebar-model'
+import type { JSX } from '@opentui/solid'
+import type { ResolvedTheme } from '@opencode-ai/theme/tui'
+import { define } from '@opencode-ai/plugin-v2/tui/plugin'
 
 const REFRESH_EVENTS = ['session.created', 'session.execution.succeeded'] as const
 
@@ -44,7 +45,7 @@ function emptyView(project: string): MemSidebarView {
  *
  * V2 TUI plugins are `Plugin.define({ id, setup })` modules rendered inside
  * the TUI process with @opentui/solid elements — the same element model as the
- * V1 sidebar, but registered through `ctx.ui.slot("sidebar.content")` with
+ * V1 sidebar, but registered through a `sidebar.content` slot claim with
  * reactive state from `ctx.storage.memory` (survives hot reloads).
  */
 export default define({
@@ -60,28 +61,42 @@ export default define({
         .split(/[\\/]/)
         .filter(Boolean)
         .findLast(Boolean) ?? 'unknown-project'
-    const theme = themeFromResolved(ctx.theme)
-
     const [state, setState] = ctx.storage.memory<SidebarState>('claude-mem.sidebar', {
       initial: { collapsed: true, view: emptyView(project) },
     })
 
     let disposed = false
     let inFlight = false
+    let refreshPending = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const refresh = async (): Promise<void> => {
+      if (disposed) {
+        return
+      }
       if (inFlight) {
+        refreshPending = true
         return
       }
       inFlight = true
       try {
-        const next = await readMemView(project, state.collapsed)
-        setState((draft) => {
-          if (viewKey(draft.view) !== viewKey(next)) {
-            draft.view = next
+        do {
+          refreshPending = false
+          const { collapsed } = state
+          // Serialize reads: a pending toggle must use the latest collapse state.
+          // eslint-disable-next-line no-await-in-loop
+          const next = await readMemView(project, collapsed)
+          if (disposed) {
+            return
           }
-        })
+          if (collapsed === state.collapsed) {
+            setState((draft) => {
+              if (viewKey(draft.view) !== viewKey(next)) {
+                draft.view = next
+              }
+            })
+          }
+        } while (refreshPending)
       } catch {
         // never throw into the TUI loop
       } finally {
@@ -90,15 +105,23 @@ export default define({
     }
 
     const onToggle = () => {
+      if (disposed) {
+        return
+      }
       setState((draft) => {
         draft.collapsed = !draft.collapsed
       })
       void refresh().catch(() => {})
     }
 
-    const disposeSlot = ctx.ui.slot('sidebar.content', () =>
-      materialize(buildMemNodes(state.view, theme, state.collapsed, onToggle), solid)
-    )
+    const disposeSlot = ctx.ui.slot({
+      append: 'sidebar.content',
+      render: () =>
+        materialize(
+          () => buildMemNodes(state.view, themeFromResolved(ctx.theme), state.collapsed, onToggle),
+          solid
+        ),
+    })
 
     // Immediate refresh on session activity; the 5s poll covers the rest.
     const disposeEvents = REFRESH_EVENTS.map((type) =>
@@ -125,6 +148,7 @@ export default define({
         if (disposed) {
           return
         }
+        schedule()
         // One-time status toast, mirroring the V1 server plugin's init toast.
         if (!state.view.healthy) {
           ctx.ui.toast.show({
@@ -134,10 +158,13 @@ export default define({
             duration: 5000,
           })
         }
-        schedule()
       })
+      .catch(() => {})
 
     return () => {
+      if (disposed) {
+        return
+      }
       disposed = true
       if (timer) {
         clearTimeout(timer)
@@ -163,11 +190,7 @@ function themeFromResolved(resolved: ResolvedTheme): Theme {
   }
 }
 
-interface SolidRuntime {
-  createElement(kind: string): unknown
-  setProp(element: unknown, name: string, value: unknown): void
-  insert(parent: unknown, child: unknown): void
-}
+type SolidRuntime = Pick<typeof Solid, 'createElement' | 'setProp' | 'insert'>
 
 function materializeNode(node: ViewNode, solid: SolidRuntime): JSX.Element {
   const element = solid.createElement(node.kind)
@@ -180,14 +203,13 @@ function materializeNode(node: ViewNode, solid: SolidRuntime): JSX.Element {
   for (const child of node.children ?? []) {
     solid.insert(element, materializeNode(child, solid))
   }
-  return element as JSX.Element
+  return element
 }
 
-function materialize(nodes: readonly ViewNode[], solid: SolidRuntime): JSX.Element {
+function materialize(nodes: () => readonly ViewNode[], solid: SolidRuntime): JSX.Element {
   const root = solid.createElement('box')
   solid.setProp(root, 'flexDirection', 'column')
-  for (const node of nodes) {
-    solid.insert(root, materializeNode(node, solid))
-  }
-  return root as JSX.Element
+  // Slot components render once; the accessor owns reactive updates and host cleanup.
+  solid.insert(root, () => nodes().map((node) => materializeNode(node, solid)))
+  return root
 }
