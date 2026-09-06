@@ -28,21 +28,36 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Verify release version
+        run: test "$GITHUB_REF_NAME" = "v$(node -p "require('./package.json').version")"
+
+      - name: Type check
+        run: bun run typecheck
+
       - name: Build
         run: bun run build
 
+      - name: Test adapters and package exports
+        run: bun test
+
       - name: Verify dist output
         run: |
-          test -f dist/index.js
-          test -f dist/index.d.ts
+          for entry in index v2 tui cli package-server package-tui; do
+            test -f "dist/$entry.js"
+            test -f "dist/$entry.d.ts"
+          done
+
+      - name: Pack release artifact
+        run: bun pm pack --ignore-scripts --filename opencode-claude-mem.tgz
+
+      - name: Publish to npm
+        run: npm publish ./opencode-claude-mem.tgz --provenance --access public
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/index.js
-            dist/index.d.ts
+            dist/*.js
+            dist/*.d.ts
+            opencode-claude-mem.tgz
           generate_release_notes: true
-
-      - name: Publish to npm
-        run: npm publish --provenance --access public

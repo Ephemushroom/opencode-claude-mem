@@ -21,9 +21,21 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Type check
+        run: bun run typecheck
+
+      - name: Build
         run: bun run build
+
+      - name: Test adapters, package exports, and sidebar
+        run: bun test
 
       - name: Verify dist output
         run: |
           test -f dist/index.js || (echo "dist/index.js missing" && exit 1)
           test -f dist/index.d.ts || (echo "dist/index.d.ts missing" && exit 1)
+          test -f dist/v2.js || (echo "dist/v2.js missing" && exit 1)
+          test -f dist/cli.js || (echo "dist/cli.js missing" && exit 1)
+          test -f dist/package-server.js || (echo "server bridge missing" && exit 1)
+          test -f dist/package-tui.js || (echo "sidebar bridge missing" && exit 1)
+          test -f dist/package-server.d.ts || (echo "server bridge types missing" && exit 1)
+          test -f dist/package-tui.d.ts || (echo "sidebar bridge types missing" && exit 1)
