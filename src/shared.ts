@@ -91,10 +91,13 @@ export function shouldSkipObservationTool(toolName: string): boolean {
     return true
   }
 
-  const normalizedName = toolName.toLowerCase()
+  const normalizedName = toolName.toLowerCase().replaceAll('_', '-')
   // Skip Claude-Mem's own MCP search tools regardless of the user-chosen MCP
   // server name (prefix varies: `claude-mem_mcp-search_`, `mem_...`, etc.)
-  if (normalizedName.includes('mcp-search') || normalizedName.includes('mem-search')) {
+  if (
+    normalizedName.includes('mcp-search') ||
+    /(?:^|[-.])mem-(?:search|timeline|get-observations)$/.test(normalizedName)
+  ) {
     return true
   }
   return META_TOOLS.has(normalizedName)
