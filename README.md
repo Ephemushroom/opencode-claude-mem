@@ -3,6 +3,9 @@
 Persistent memory for [OpenCode](https://opencode.ai), powered by
 [Claude-Mem](https://github.com/thedotmack/claude-mem).
 
+**Supports OpenCode 1 and OpenCode 2 with the same package name from v0.5.0.**
+No `/v2` or `/cli` suffix is required. Existing version-specific entries remain compatible.
+
 Share the same Claude-Mem worker, database, and memory across your coding
 agents: memories written by Claude Code are visible to OpenCode, and vice
 versa. Previous observations and summaries are injected into new OpenCode
@@ -39,7 +42,7 @@ flowchart LR
 
 ```json
 {
-  "plugins": ["@ephemushroom/opencode-claude-mem/v2"]
+  "plugins": ["@ephemushroom/opencode-claude-mem"]
 }
 ```
 
@@ -55,33 +58,46 @@ to avoid running two claude-mem integrations at once.
 ## OpenCode 1 and 2
 
 OpenCode 1 and OpenCode 2 install side by side (`opencode` vs `opencode2`) and
-their plugin APIs are incompatible — **V1 plugins do not load in V2**. This
-package ships both entrypoints in the same npm package, so each runtime loads
-only its own:
+their plugin APIs are incompatible. This package exposes **one bare package
+name for both runtimes**, with thin bridges that select the existing adapter
+contract. No `/v2` or `/cli` suffix is needed:
 
 | | OpenCode 1 | OpenCode 2 |
 |---|---|---|
 | **Binary** | `opencode` | `opencode2` |
 | **Server plugin config** | `opencode.json` → `plugin` | `opencode.json` → `plugins` |
-| **Server plugin entry** | `@ephemushroom/opencode-claude-mem` | `@ephemushroom/opencode-claude-mem/v2` |
+| **Server plugin entry** | `@ephemushroom/opencode-claude-mem` | `@ephemushroom/opencode-claude-mem` |
 | **Sidebar config** | `~/.config/opencode/tui.json` → `plugin` (self-healed) | `~/.config/opencode/cli.json` → `plugins` (self-healed) |
-| **Sidebar entry** | package `./tui` export | package `./cli` export |
+| **Sidebar config entry** | `@ephemushroom/opencode-claude-mem` | `@ephemushroom/opencode-claude-mem` |
+| **Sidebar resolution** | package `./tui` export, `tui()` | package `./tui` export, `setup()` |
 
 Both adapters talk to the same Claude-Mem worker, so memory written from V1,
 V2, and Claude Code is shared. The V2 entrypoint covers the same behavior —
 context injection, tool observation capture, the `mem-search`/`mem-timeline`/
-`mem-get-observations` tools, session init/summarize/complete via the event
+`mem-get-observations` tools, session init/summarize/cleanup via the event
 stream.
 
+The bare package is tested with `opencode 1.18.29` and
+`opencode2 0.0.0-beta-19151`; the V2 SDK is pinned because preview APIs can
+change. Unified routing requires **v0.5.0 or later**; the older `0.4.4` package
+does not provide it. Upgrade the package in both server and sidebar configurations.
+Existing `/server`, `/tui`, `/v2`, and `/cli` exports remain supported; replace
+an old config entry rather than adding the bare name beside it.
+
+After upgrading, finish active tasks, close the client, and restart the V2
+background service with `opencode2 service restart` before reopening `opencode2`.
+For V1, restart `opencode`. Verify server activation with `opencode2 plugin list`.
+
 In V2, installing the server plugin
-(`"plugins": ["@ephemushroom/opencode-claude-mem/v2"]`) auto-appends
-`@ephemushroom/opencode-claude-mem/cli` to the `plugins` array in
-`~/.config/opencode/cli.json` on first load — no manual step. To register
-manually, add it yourself:
+(`"plugins": ["@ephemushroom/opencode-claude-mem"]`) auto-appends the same
+bare package to `~/.config/opencode/cli.json` on first load. Restart OpenCode
+after that first load if the sidebar is not yet present. Beta `19151` still
+uses a separate CLI config; this is not a promise of same-launch discovery
+from the server config alone. To register manually, use:
 
 ```json
 {
-  "plugins": ["@ephemushroom/opencode-claude-mem/cli"]
+  "plugins": ["@ephemushroom/opencode-claude-mem"]
 }
 ```
 
@@ -123,14 +139,17 @@ MCP/Context sections — borderless, click-to-toggle:
   loop cheap (stats every 5s).
 - Fails open: worker offline → shows the offline state, never blocks the TUI.
 
-The sidebar loads via the package's `./tui` export (OpenCode 1) or `./cli`
-export (OpenCode 2 — registered in `~/.config/opencode/cli.json`). On startup
+The sidebar loads via the package's `./tui` bridge in both versions (OpenCode 2
+registers the bare name in `~/.config/opencode/cli.json`). On startup
 the plugin **self-heals the TUI config**: if it is registered as a server
 plugin but missing from the TUI plugin list, it appends itself — no manual
 configuration. OpenCode 1 writes into `tui.json` (symlinked files are written
 through, preserving dotfiles setups); OpenCode 2 appends
-`@ephemushroom/opencode-claude-mem/cli` to `cli.json`'s `plugins` array
-(comment-bearing files are left untouched).
+`@ephemushroom/opencode-claude-mem` to `cli.json`'s `plugins` array.
+Existing bare, `/cli`, or `/tui` sidebar entries (including versions and
+object-form options) are left untouched, without adding another entry.
+Malformed or comment-bearing CLI config is left untouched; add the bare name
+manually in that case.
 
 ### Memory Tools
 
@@ -172,7 +191,7 @@ sequenceDiagram
     OC->>P: session idle / execution succeeded / compaction ended
     P->>W: POST /api/sessions/summarize
     OC->>P: session.deleted
-    P->>W: POST /api/sessions/complete
+    P->>P: flush pending observations and release local state
 ```
 
 The plugin is intentionally small: it only adapts OpenCode hook events to the
@@ -195,8 +214,8 @@ APIs:
 | File edit observations | `event` (`file.edited`) | `ctx.tool.hook('execute.after')` |
 | Summarize on idle | `event` (`session.idle`) | `session.execution.succeeded` event |
 | Summarize after compaction | `event` (`session.compacted`) | `session.compaction.ended` event |
-| Complete session | `event` (`session.deleted`) | `session.deleted` event |
-| Sidebar slot | `api.slots.register` (`sidebar_content`) | `ctx.ui.slot('sidebar.content')` |
+| Release session tracking | `event` (`session.deleted`) | `session.deleted` event |
+| Sidebar slot | `api.slots.register` (`sidebar_content`) | `ctx.ui.slot({ append: 'sidebar.content', render })` |
 
 ### Cross-Tool Memory Sharing
 
@@ -247,12 +266,12 @@ Add this plugin to your project or global `opencode.json`:
 
 ```json
 {
-  "plugins": ["@ephemushroom/opencode-claude-mem/v2"]
+  "plugins": ["@ephemushroom/opencode-claude-mem"]
 }
 ```
 
-The two runtimes can be installed side by side and load their own entrypoint —
-V1 plugins do not load in V2 and vice versa.
+The two runtimes can be installed side by side and use the same package name.
+Their config keys remain different: `plugin` in V1, `plugins` in V2.
 
 Then restart OpenCode.
 
@@ -322,7 +341,7 @@ for the per-runtime API):
 | _(streaming)_ | file edits (`file.edited` / tool hook) | Record file edit observations |
 | _(compaction)_ | `session.compacted` / `session.compaction.ended` | Summarize after OpenCode compacts |
 | `Stop` | `session.idle` / `session.execution.succeeded` | Flush + summarize |
-| `SessionEnd` | `session.deleted` | Flush + complete (no zombie active rows) |
+| `SessionEnd` | `session.deleted` | Flush observations and release local state; Worker self-completes |
 
 ### Worker API Endpoints Used
 
@@ -333,7 +352,6 @@ for the per-runtime API):
 | `POST` | `/api/sessions/init` | Initialize session |
 | `POST` | `/api/sessions/observations` | Store tool observation |
 | `POST` | `/api/sessions/summarize` | Trigger summarization |
-| `POST` | `/api/sessions/complete` | Complete session |
 | `GET` | `/api/search?query=...&project=...&dateStart=...&dateEnd=...` | `mem-search`; also supports `limit`, `platformSource`, `type`, `obs_type`, `offset`, and `orderBy` |
 | `GET` | `/api/timeline?project={name}&anchor={id}` | `mem-timeline` |
 | `POST` | `/api/observations/batch` | `mem-get-observations` |
@@ -352,6 +370,12 @@ The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
   `src/sidebar-model.ts` hold the shared pure helpers; `src/worker-client.ts`
   is a static HTTP client; `src/tui-registration.ts` self-heals `tui.json`
   (V1) and `cli.json` (V2).
+- **Static package bridges** — `src/package-server.ts` exposes `{ id, server,
+  setup }` at both `.` and `./server`; `src/package-tui.ts` exposes `{ id, tui,
+  setup }` at `./tui`. V1 reads `server`/`tui`; V2 reads `setup`. Neither bridge
+  invokes both adapters. Both installed server loaders prefer `./server`, so
+  routing only the root export to V2 is insufficient. Never combine `server`
+  and `tui` in one object: V1 rejects that shape.
 - **Zero runtime dependencies for server plugins** — the OpenCode plugin SDK
   is bundled into `dist/` (V1 `index.js` ~480 KB, V2 `v2.js` ~30 KB via a deep
   `@opencode-ai/plugin` import that skips effect). The TUI entrypoints keep
@@ -366,9 +390,10 @@ The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
   avoiding startup crashes caused by early TUI access.
 - **Auto-start** — if the worker is down on load, spawns
   `bunx claude-mem start` once per OpenCode process (skipped if `bun` is not
-  on `PATH`).
+  on `PATH`). Health is rechecked on subsequent hooks, so a recovered Worker
+  does not require restarting OpenCode.
 - **Context caching** — memory context is fetched once per session and reused
-  across prompt injection and compaction.
+  across prompt injection and compaction. Failed fetches are not cached.
 - **Circular memory protection** — injected context is wrapped in
   `<claude-mem-context>` tags, Claude-Mem search tools are skipped from
   observation capture, and memory tags are stripped before storage.
@@ -376,9 +401,13 @@ The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
   truncated by UTF-8 byte size (24 KB cap).
 - **Field name correctness** — worker payloads use `contentSessionId`, not
   `claudeSessionId` (the wrong name fails silently).
-- **Session lifecycle hygiene** — `session.deleted` triggers
-  `completeSession`, preventing zombie `active` rows from accumulating stale
-  `pending_messages`.
+- **Session lifecycle hygiene** — `session.deleted` flushes pending observations
+  and releases local tracking. Claude-Mem self-completes processing; the removed
+  `/api/sessions/complete` endpoint is not called.
+- **Attribution** — observations include the OpenCode call ID as `tool_use_id`;
+  summaries include the latest assistant's `observedModel` when available.
+- **Write status** — failed HTTP writes return failure without throwing; a summary
+  toast is shown only after the Worker accepts the request, not after generation.
 
 ## Troubleshooting
 
@@ -411,7 +440,7 @@ plugin load. If the toast still appears:
   its `plugin` array — the plugin self-heals this file on load, so restarting
   OpenCode twice (once to heal, once to load) fixes a missing entry.
 - **OpenCode 2**: check `~/.config/opencode/cli.json` contains
-  `@ephemushroom/opencode-claude-mem/cli` in its `plugins` array — self-healed
+  `@ephemushroom/opencode-claude-mem` in its `plugins` array — self-healed
   the same way (comment-bearing cli.json files are left untouched, so remove
   the comments or add the entry manually).
 - The sidebar requires OpenCode's `@opentui/solid` runtime; if unavailable the
@@ -437,14 +466,28 @@ plugin load. If the toast still appears:
 
 ```bash
 bun install
-bun run build       # bundle dist/{index,v2,tui,cli}.js + emit declarations
-bun test            # bun's built-in runner
+bun run build       # four adapters + package-server/package-tui bridges + declarations
+bun test            # build first: export tests import the actual dist artifacts
 bun run lint        # oxlint
 bun run fmt:check   # oxfmt
+bun src/test-fixtures/v2-runtime.ts    # installed V2: packed bare package, local model + Worker
+bun src/test-fixtures/v2-runtime.ts v1 # installed V1: same package and behavior assertions
+bun src/test-fixtures/tui-runtime.ts  # installed V2 TUI: bare CLI entry loads the sidebar
+bun --conditions=browser src/test-fixtures/cli-driver.ts render # real rendering + mouse click
 ```
 
 If you edit source code locally, rebuild and restart OpenCode to pick up the
 new plugin bundle.
+
+The runtime QA drivers never write to your real config or memory database and
+never use paid models. They pack the current build, serve it through a temporary
+local registry, and ask the installed host to resolve the bare npm name in an
+isolated home/cache. Registry access is needed for package dependencies. Server
+QA drives injection, exactly-once tool capture, all three memory tools, and
+summarization. The V2 TUI probe proves sidebar setup through Worker polling and
+unchanged bare CLI config, not whole-window visual layout (its terminal is piped).
+The separate OpenTUI driver exercises actual bridge rendering and clicks. V1's
+interactive host is not verified through pipes; its server runtime is verified.
 
 ## License
 

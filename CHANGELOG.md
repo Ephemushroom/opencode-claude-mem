@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-06
+
+### Fixed
+
+- Repair the existing OpenCode 2 adapter against SDK `0.0.0-beta-19151`: use
+  the current CLI slot claim shape, keep the sidebar reactive, and dispose event
+  subscriptions and refresh work safely.
+- Resolve resumed V2 session locations, isolate server-wide events, share concurrent
+  initialization, and skip both hyphenated and normalized memory tool names.
+- Recognize object-form CLI registrations without duplicates and leave malformed
+  configuration untouched.
+- Stop calling the removed Worker `/api/sessions/complete` endpoint. Session
+  deletion still flushes observations and releases local state; the Worker
+  completes processing itself.
+- Recheck Worker health after the once-only startup attempt and retry failed
+  context fetches, allowing recovery without restarting OpenCode.
+- Check write responses and only report accepted summary requests as queued.
+
+### Added
+
+- Unified bare package configuration for OpenCode V1 and V2, including the sidebar
+  without a `/cli` suffix. Thin static server/TUI bridges preserve the separate
+  adapters and existing `/server`, `/tui`, `/v2`, and `/cli` consumers.
+- Bare-name CLI self-healing recognizes existing legacy sidebar aliases and options
+  without appending duplicates. Beta-19151 still uses `cli.json` and may need a restart.
+- Packed-package QA against both installed server runtimes via an isolated local
+  registry, plus a whole-host V2 sidebar loading probe and bridge rendering coverage.
+- Forward OpenCode tool call IDs as `tool_use_id` and the observed assistant
+  model as `observedModel` in summary requests.
+- Isolated HTTP regression scenarios for lifecycle, attribution, and recovery.
+- Native OpenTUI rendering scenarios and an isolated real `opencode2` runtime QA
+  driver with a local model and Worker fixture.
+
 ## [0.4.3] - 2026-07-23
 
 ### Added

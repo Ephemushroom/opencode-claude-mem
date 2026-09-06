@@ -9,6 +9,8 @@ bridges OpenCode hooks to the Claude-Mem worker service.
 - **Language**: TypeScript (strict mode)
 - **Package manager**: Bun (`bun install`, lockfile: `bun.lock`)
 - **Entry points**:
+  - `src/package-server.ts` — static V1/V2 server bridge at `.` and `./server`
+  - `src/package-tui.ts` — static V1/V2 sidebar bridge at `./tui`
   - `src/index.ts` — OpenCode **V1** plugin (default export `{ server }`)
   - `src/v2.ts` — OpenCode **V2** plugin (`Plugin.define` via `@opencode-ai/plugin-v2/promise/plugin`)
   - `src/tui.ts` — OpenCode **V1** TUI plugin (Memory sidebar, `{ id, tui }`)
@@ -26,7 +28,8 @@ bridges OpenCode hooks to the Claude-Mem worker service.
 bun install
 
 # Build (type-check + emit)
-bun run build          # runs: tsc
+bun run build          # bundle adapters, transpile bridges, emit declarations
+bun test               # build first: package export tests load dist artifacts
 
 # Dev mode (watch)
 bun run dev            # runs: tsc --watch
@@ -137,7 +140,17 @@ throw error                       // breaks OpenCode
 
 ### Plugin Architecture
 
-Two entrypoints exist — one per OpenCode runtime (they are API-incompatible):
+Adapters remain separate because the runtime APIs are incompatible. Bare package
+config works in both versions through two static bridges:
+
+- `.` and `./server` -> `package-server.ts`: `{ id, server: v1.server, setup: v2.setup }`
+- `./tui` -> `package-tui.ts`: `{ id, tui: v1.tui, setup: v2.setup }`
+- `/v2` and `/cli` remain explicit V2 aliases; all original dist adapter files remain.
+- Actual installed V1 1.18.29 and V2 beta-19151 server loaders prefer `./server`.
+  Do not assume V2 only resolves `.`. V1 rejects an object containing both
+  `server` and `tui`, but ignores `setup`; V2 requires `id` and `setup` (or `effect`).
+- Bridges import adapter definitions but never run setup at module evaluation.
+  Build them with imports external so they reference the separate adapter bundles.
 
 **V1 (`src/index.ts`)** — exports a single async factory function
 (`ClaudeMemPlugin`) that:
@@ -161,17 +174,20 @@ effect/schema, the deep path bundles to ~28 KB). Setup registers:
   on `status: 'completed'`, `event.error` on `'error'`)
 - `ctx.tool.transform((tools) => tools.add(...))` — the `mem-*` tools with
   `options: { codemode: false }` (exposed directly to the provider)
-- `ctx.event.subscribe()` — detached async loop (never awaited in setup, retried
-  on disconnect after `EVENT_RETRY_DELAY_MS`); assistant text comes from
+- `ctx.event.subscribe({ signal })` — detached async loop (never awaited in setup,
+  retried on disconnect after `EVENT_RETRY_DELAY_MS`, aborted on cleanup); assistant text comes from
   `session.text.ended` (complete text, no debounce needed), summarization on
-  `session.execution.succeeded` / `session.compaction.ended`, completion on
+  `session.execution.succeeded` / `session.compaction.ended`, local cleanup on
   `session.deleted`
 
 V2 has no `client.tui` — there is no toast API; skip toasts entirely.
 
 **V2 TUI (`src/cli.ts`)** — `Plugin.define({ id: 'claude-mem.tui', setup })`
 via `@opencode-ai/plugin-v2/tui/plugin`. Loaded from `~/.config/opencode/cli.json`
-`plugins` array as `@ephemushroom/opencode-claude-mem/cli`. Renders the
+`plugins` array as `@ephemushroom/opencode-claude-mem` through the `./tui` bridge.
+Beta-19151 uses separate CLI config; self-heal adds the bare name, preserves
+legacy `/cli` and `/tui` entries/options, and may require another restart.
+Do not claim same-launch sidebar discovery from server config alone. Renders the
 Memory sidebar into the `sidebar.content` slot:
 - Element model: imperative `@opentui/solid` `createElement`/`setProp`/`insert`
   (same as V1), dynamic-imported at setup with a graceful null fallback
@@ -181,6 +197,8 @@ Memory sidebar into the `sidebar.content` slot:
   `session.created` / `session.execution.succeeded` via `ctx.data.on`
 - One-time offline warning toast via `ctx.ui.toast.show`
 - Setup returns a cleanup (timer, slot disposer, event disposers)
+- Slot registration uses `{ append: 'sidebar.content', render }`; reactive children
+  are inserted through an accessor because the slot component only renders once.
 - `@opentui/solid` is a real runtime `dependency` (OpenCode installs plugin
   deps into an isolated cache) but is also dynamic-imported defensively
 
@@ -191,6 +209,11 @@ session (`sessionDirs`, `contextCache`, `sessionUserTexts`,
 The sidebar view model (stats + rows) lives in `src/sidebar-model.ts`, shared
 by `tui.ts` (V1) and `cli.ts` (V2); themes map V2 `ResolvedTheme` RGBA
 tokens onto the model's `Theme` interface.
+
+The V2 SDK alias is pinned to `0.0.0-beta-19151`; do not float it on `next`.
+V2 resolves resumed sessions through `ctx.session.get`, scopes server events to the
+plugin location, shares concurrent initialization, and retries failed health/context
+reads. Both adapters forward call IDs (`tool_use_id`) and observed model metadata.
 
 ### Critical Implementation Details
 
@@ -214,13 +237,14 @@ Calls go to the resolved Claude-Mem worker endpoint:
 | POST   | `/api/sessions/init`              | Initialize session         |
 | POST   | `/api/sessions/observations`      | Send tool observation      |
 | POST   | `/api/sessions/summarize`         | Trigger summarization      |
-| POST   | `/api/sessions/complete`          | Complete session           |
 | GET    | `/api/search?query=...&project=...&dateStart=...&dateEnd=...` | Search memory with full filters |
 
 ## File Structure
 
 ```
 src/
+  package-server.ts — Bare package/server export; static V1/V2 contracts
+  package-tui.ts    — Package tui export; static V1/V2 sidebar contracts
   index.ts          — OpenCode V1 plugin entry: hooks, toast, session management
   v2.ts             — OpenCode V2 plugin entry: Plugin.define setup + event loop
   tui.ts            — OpenCode V1 TUI plugin (Memory sidebar, { id, tui })
@@ -242,6 +266,6 @@ dist/               — Build output (gitignored)
 1. Don't add `console.*` calls — they corrupt the OpenCode TUI
 2. Don't call TUI methods during plugin initialization — defer to first hook invocation
 3. Always use `contentSessionId` in worker API payloads, never `claudeSessionId`
-4. The plugin is loaded as a single JS file via symlink — keep the dependency footprint minimal
+4. Package bridges reference adjacent adapter bundles: ship all of dist, not a bridge file alone
 5. Worker must be running (via Claude Code) before the plugin can function
 6. **Windows `nul` file**: If you see a `nul` file in the project root, delete it (`rm nul`). Do not commit it. It is already in `.gitignore`.
