@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 
 const HEALTH_TIMEOUT_MS = 1000
+const WRITE_TIMEOUT_MS = 10000
 const AUTOSTART_POLL_INTERVAL_MS = 500
 const AUTOSTART_POLL_MAX_ATTEMPTS = 16
 const DEFAULT_WORKER_HOST = '127.0.0.1'
@@ -43,6 +44,11 @@ export interface SearchOptions {
   readonly dateEnd?: string
   readonly offset?: number
   readonly orderBy?: SearchOrder
+}
+
+export interface ObservedMetadata {
+  readonly observedModel?: string
+  readonly observedBilling?: string
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -172,13 +178,9 @@ export class WorkerClient {
    */
   static async isHealthy(): Promise<boolean> {
     try {
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS)
-
       const response = await fetch(`${this.BASE_URL}/api/health`, {
-        signal: controller.signal,
+        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
       })
-      clearTimeout(timeoutId)
       return response.ok
     } catch {
       return false
@@ -193,8 +195,10 @@ export class WorkerClient {
    * Idempotent + serialised within the process via `autoStartPromise`.
    */
   static async ensureRunning(): Promise<boolean> {
-    const result = await this.tryAutoStart()
-    return result === 'already-running' || result === 'started'
+    // The startup attempt is once-only, but its result is not current health.
+    // Recheck so an offline worker can recover without reloading the plugin.
+    await this.tryAutoStart()
+    return this.isHealthy()
   }
 
   /**
@@ -307,6 +311,7 @@ export class WorkerClient {
     try {
       const response = await fetch(`${this.BASE_URL}/api/sessions/init`, {
         method: 'POST',
+        signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contentSessionId,
@@ -330,13 +335,15 @@ export class WorkerClient {
   static async sendObservation(
     contentSessionId: string,
     toolName: string,
-    toolInput: any,
-    toolResponse: any,
-    cwd: string
-  ): Promise<void> {
+    toolInput: unknown,
+    toolResponse: unknown,
+    cwd: string,
+    toolUseId?: string
+  ): Promise<boolean> {
     try {
-      await fetch(`${this.BASE_URL}/api/sessions/observations`, {
+      const response = await fetch(`${this.BASE_URL}/api/sessions/observations`, {
         method: 'POST',
+        signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contentSessionId,
@@ -345,10 +352,12 @@ export class WorkerClient {
           tool_response: toolResponse,
           cwd,
           platformSource: PLATFORM_SOURCE,
+          tool_use_id: toolUseId,
         }),
       })
+      return response.ok
     } catch {
-      // silently fail
+      return false
     }
   }
 
@@ -358,36 +367,26 @@ export class WorkerClient {
   static async summarize(
     contentSessionId: string,
     lastUserMessage: string,
-    lastAssistantMessage: string
-  ): Promise<void> {
+    lastAssistantMessage: string,
+    metadata: ObservedMetadata = {}
+  ): Promise<boolean> {
     try {
-      await fetch(`${this.BASE_URL}/api/sessions/summarize`, {
+      const response = await fetch(`${this.BASE_URL}/api/sessions/summarize`, {
         method: 'POST',
+        signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contentSessionId,
           last_user_message: lastUserMessage,
           last_assistant_message: lastAssistantMessage,
           platformSource: PLATFORM_SOURCE,
+          observedModel: metadata.observedModel,
+          observedBilling: metadata.observedBilling,
         }),
       })
+      return response.ok
     } catch {
-      // silently fail
-    }
-  }
-
-  /**
-   * Complete session
-   */
-  static async completeSession(contentSessionId: string): Promise<void> {
-    try {
-      await fetch(`${this.BASE_URL}/api/sessions/complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contentSessionId, platformSource: PLATFORM_SOURCE }),
-      })
-    } catch {
-      // silently fail
+      return false
     }
   }
 

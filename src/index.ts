@@ -1,6 +1,3 @@
-import { type Plugin, type PluginModule, tool } from '@opencode-ai/plugin'
-import { WorkerClient } from './worker-client'
-import { ensureTuiPluginEntry } from './tui-registration'
 import {
   MAX_OBSERVATION_BYTES,
   extractTextFromParts,
@@ -10,6 +7,9 @@ import {
   stripTaggedContent,
   truncateUtf8Bytes,
 } from './shared'
+import { type Plugin, type PluginModule, tool } from '@opencode-ai/plugin'
+import { WorkerClient } from './worker-client'
+import { ensureTuiPluginEntry } from './tui-registration'
 
 const ASSISTANT_FLUSH_DEBOUNCE_MS = 250
 
@@ -61,7 +61,9 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       return contextCache
     }
     const context = await WorkerClient.getContext(projectName)
-    contextCache = context
+    if (context !== null) {
+      contextCache = context
+    }
     return context
   }
 
@@ -75,28 +77,21 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
    *
    * If the worker is offline and `bun` is on PATH, we attempt to launch it
    * once via `bunx claude-mem start` (matches what `npx claude-mem install
-   * --ide opencode` users would run manually). Result is cached so subsequent
-   * calls are cheap.
+   * --ide opencode` users would run manually). Startup is once-only, but health
+   * is checked again so a later recovery is observable.
    */
   async function checkWorkerAndToast(): Promise<boolean> {
-    if (workerHealthy === null) {
-      // First call — try to ensure the worker is actually running. If it
-      // already is, this is a single cheap health check. If it isn't, this
-      // spawns `bunx claude-mem start` once and waits up to ~8s for it to
-      // report healthy.
-      workerHealthy = await WorkerClient.ensureRunning()
-    }
-    if (!initToastShown) {
+    const previousHealth = workerHealthy
+    workerHealthy = await WorkerClient.ensureRunning()
+    if (!initToastShown || previousHealth !== workerHealthy) {
       initToastShown = true
-      if (workerHealthy) {
-        await toast(`Memory active · ${projectName}`, 'success')
-      } else {
-        await toast(
-          'Worker offline — install Claude-Mem (bunx claude-mem start) or start Claude Code first',
-          'warning',
-          5000
-        )
-      }
+      await toast(
+        workerHealthy
+          ? `Memory active · ${projectName}`
+          : 'Worker offline — install Claude-Mem (bunx claude-mem start) or start Claude Code first',
+        workerHealthy ? 'success' : 'warning',
+        workerHealthy ? 3000 : 5000
+      )
     }
     return workerHealthy
   }
@@ -233,9 +228,10 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
    */
   async function fetchLastMessages(
     sessionId: string
-  ): Promise<{ user: string; assistant: string }> {
+  ): Promise<{ user: string; assistant: string; observedModel?: string }> {
     let user = ''
     let assistant = ''
+    let observedModel: string | undefined = undefined
 
     try {
       const result = await client.session.messages({ path: { id: sessionId } })
@@ -248,8 +244,10 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
           }
         }
         for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].info.role === 'assistant') {
+          const { info } = messages[i]
+          if (info.role === 'assistant') {
             assistant = extractTextFromParts(messages[i].parts)
+            observedModel = info.modelID
             break
           }
         }
@@ -258,7 +256,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       // ignore
     }
 
-    return { user, assistant }
+    return { user, assistant, observedModel }
   }
 
   return {
@@ -506,8 +504,8 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
           }
 
           try {
-            const { user, assistant } = await fetchLastMessages(sessionId)
-            await WorkerClient.summarize(sessionId, user, assistant)
+            const { user, assistant, observedModel } = await fetchLastMessages(sessionId)
+            await WorkerClient.summarize(sessionId, user, assistant, { observedModel })
           } catch {
             // silently fail
           }
@@ -522,9 +520,10 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
           await flushAssistantBuffer(sessionId)
 
           try {
-            const { user, assistant } = await fetchLastMessages(sessionId)
-            await WorkerClient.summarize(sessionId, user, assistant)
-            await toast('Session summarized', 'success', 2000)
+            const { user, assistant, observedModel } = await fetchLastMessages(sessionId)
+            if (await WorkerClient.summarize(sessionId, user, assistant, { observedModel })) {
+              await toast('Session summary queued', 'success', 2000)
+            }
           } catch {
             // silently fail
           }
@@ -532,10 +531,8 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
         }
 
         case 'session.deleted': {
-          // OpenCode removed the session. Flush any pending buffer, then tell
-          // the worker so the sdk_sessions row is marked completed instead of
-          // hanging in 'active' as a zombie (the root cause of queueDepth
-          // accumulation seen in earlier worker logs).
+          // Flush local buffers and release tracking. The worker self-completes;
+          // externally completing it would discard pending observations.
           const sessionId = event.properties?.info?.id || currentSessionId
           if (!sessionId) {
             return
@@ -547,11 +544,6 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
             currentSessionId = null
           }
 
-          try {
-            await WorkerClient.completeSession(sessionId)
-          } catch {
-            // silently fail
-          }
           return
         }
 
@@ -644,7 +636,9 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       }
 
       // Ensure session is initialized before sending observations
-      await ensureSessionInit(sessionId)
+      if (!(await ensureSessionInit(sessionId))) {
+        return
+      }
 
       try {
         const sanitizedToolInput = sanitizeObservationValue(input.args || {})
@@ -658,7 +652,8 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
           input.tool,
           sanitizedToolInput,
           sanitizedToolOutput,
-          projectRoot
+          projectRoot,
+          input.callID
         )
       } catch {
         // Silently fail - don't block tool execution

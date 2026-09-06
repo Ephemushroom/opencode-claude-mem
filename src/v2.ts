@@ -1,6 +1,4 @@
-import { define } from '@opencode-ai/plugin-v2/promise/plugin'
-import { WorkerClient } from './worker-client'
-import { ensureCliPluginEntry } from './tui-registration'
+import { type Context, define } from '@opencode-ai/plugin-v2/promise/plugin'
 import {
   MAX_OBSERVATION_BYTES,
   extractTextFromParts,
@@ -10,8 +8,12 @@ import {
   stripTaggedContent,
   truncateUtf8Bytes,
 } from './shared'
+import { WorkerClient } from './worker-client'
+import { ensureCliPluginEntry } from './tui-registration'
 
 const EVENT_RETRY_DELAY_MS = 10_000
+type StreamEvent =
+  ReturnType<Context['event']['subscribe']> extends AsyncIterable<infer E> ? E : never
 
 /**
  * OpenCode V2 plugin for Claude-Mem.
@@ -40,26 +42,41 @@ export default define({
     // without manual configuration (mirrors the V1 tui.json self-heal).
     ensureCliPluginEntry()
 
-    // Worker health checked lazily — never during module load.
-    let workerHealthy: boolean | null = null
+    const controller = new AbortController()
     const initializedSessions = new Set<string>()
+    const sessionInits = new Map<string, Promise<boolean>>()
     // Per-session context cache — fetched once per session (mirrors V1 but
     // keyed by session because the V2 server hosts multiple sessions).
-    const contextCache = new Map<string, string | null>()
+    const contextCache = new Map<string, string>()
     const sessionDirs = new Map<string, string>()
     const sessionUserTexts = new Map<string, string>()
     const sessionAssistantTexts = new Map<string, string>()
-    let defaultDirectory = process.cwd()
+    const sessionModels = new Map<string, string>()
+    const defaultDirectory = ctx.location.directory
 
     async function checkWorker(): Promise<boolean> {
-      if (workerHealthy === null) {
-        workerHealthy = await WorkerClient.ensureRunning()
+      return !controller.signal.aborted && (await WorkerClient.ensureRunning())
+    }
+
+    async function loadSessionLocation(sessionId: string): Promise<boolean> {
+      if (sessionDirs.has(sessionId)) {
+        return true
       }
-      return workerHealthy
+      try {
+        const session = await ctx.session.get({ sessionID: sessionId })
+        // The event stream is server-wide; never capture another location's sessions.
+        if (controller.signal.aborted || session.location.directory !== defaultDirectory) {
+          return false
+        }
+        sessionDirs.set(sessionId, session.location.directory)
+        return true
+      } catch {
+        return false
+      }
     }
 
     function projectNameFromDirectory(directory: string): string {
-      return directory.split(/[\\/]/).filter(Boolean).at(-1) || 'unknown-project'
+      return directory.split(/[\\/]/).findLast(Boolean) || 'unknown-project'
     }
 
     function getProjectName(sessionId: string): string {
@@ -74,29 +91,42 @@ export default define({
       if (initializedSessions.has(sessionId)) {
         return true
       }
-      if (!(await checkWorker())) {
-        return false
+      const existing = sessionInits.get(sessionId)
+      if (existing) {
+        return existing
       }
-      try {
+      const pending = (async () => {
+        if (!(await checkWorker()) || !(await loadSessionLocation(sessionId))) {
+          return false
+        }
         const result = await WorkerClient.sessionInit(
           sessionId,
           getProjectName(sessionId),
           prompt || 'SESSION_START'
         )
-        if (!result) {
+        if (!result || controller.signal.aborted || !sessionInits.has(sessionId)) {
           return false
         }
         initializedSessions.add(sessionId)
         return true
-      } catch {
-        return false
+      })()
+      sessionInits.set(sessionId, pending)
+      try {
+        return await pending
+      } finally {
+        if (sessionInits.get(sessionId) === pending) {
+          sessionInits.delete(sessionId)
+        }
       }
     }
 
     /** Context cache per session — invalidated on session.created. */
     async function getCachedContext(sessionId: string): Promise<string | null> {
       if (!contextCache.has(sessionId)) {
-        contextCache.set(sessionId, await WorkerClient.getContext(getProjectName(sessionId)))
+        const context = await WorkerClient.getContext(getProjectName(sessionId))
+        if (context !== null && !controller.signal.aborted && sessionDirs.has(sessionId)) {
+          contextCache.set(sessionId, context)
+        }
       }
       return contextCache.get(sessionId) ?? null
     }
@@ -105,7 +135,8 @@ export default define({
       sessionId: string,
       toolName: string,
       toolInput: unknown,
-      toolResponse: unknown
+      toolResponse: unknown,
+      toolUseId?: string
     ): Promise<void> {
       if (!(await ensureSessionInit(sessionId))) {
         return
@@ -116,7 +147,8 @@ export default define({
           toolName,
           toolInput,
           toolResponse,
-          sessionDirs.get(sessionId) || defaultDirectory
+          sessionDirs.get(sessionId) || defaultDirectory,
+          toolUseId
         )
       } catch {
         // silently fail
@@ -128,14 +160,19 @@ export default define({
       if (!Array.isArray(messages)) {
         return ''
       }
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const message = messages[i] as any
-        if (!message || message.role !== 'user') {
-          continue
-        }
-        const text = extractTextFromParts(message.content)
-        if (text) {
-          return text
+      for (const message of messages.toReversed()) {
+        if (
+          message &&
+          typeof message === 'object' &&
+          'role' in message &&
+          message.role === 'user' &&
+          'content' in message &&
+          Array.isArray(message.content)
+        ) {
+          const text = extractTextFromParts(message.content)
+          if (text) {
+            return text
+          }
         }
       }
       return ''
@@ -149,25 +186,18 @@ export default define({
       if (!result || typeof result !== 'object') {
         return normalizeToolOutput(result)
       }
-      const record = result as Record<string, unknown>
-      const content = record['content']
+      const content = 'content' in result ? result.content : undefined
       if (typeof content === 'string') {
         return content
       }
       if (Array.isArray(content)) {
-        const text = content
-          .map((part: any) =>
-            part && part.type === 'text' && typeof part.text === 'string' ? part.text : ''
-          )
-          .filter(Boolean)
-          .join('\n')
-          .trim()
+        const text = extractTextFromParts(content)
         if (text) {
           return text
         }
       }
-      if (record['output'] !== undefined) {
-        return normalizeToolOutput(record['output'])
+      if ('output' in result && result.output !== undefined) {
+        return normalizeToolOutput(result.output)
       }
       return normalizeToolOutput(result)
     }
@@ -183,6 +213,10 @@ export default define({
       if (!sessionId) {
         return
       }
+      if (!(await loadSessionLocation(sessionId))) {
+        return
+      }
+      sessionModels.set(sessionId, event.model.id)
       sessionUserTexts.set(sessionId, extractLastUserText(event.messages))
       await ensureSessionInit(sessionId, sessionUserTexts.get(sessionId))
       if (!(await checkWorker())) {
@@ -223,7 +257,7 @@ export default define({
         ),
         MAX_OBSERVATION_BYTES
       )
-      await sendObservation(sessionId, event.tool, sanitizedInput, sanitizedOutput)
+      await sendObservation(sessionId, event.tool, sanitizedInput, sanitizedOutput, event.id)
     })
 
     /**
@@ -393,9 +427,13 @@ export default define({
      * Runs detached (never awaited in setup) with a retry if the stream drops.
      */
     let aborted = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined = undefined
     const subscribeAndHandleEvents = async (): Promise<void> => {
       try {
-        for await (const event of ctx.event.subscribe()) {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (aborted) {
+            return
+          }
           try {
             await handleEvent(event)
           } catch {
@@ -404,10 +442,9 @@ export default define({
         }
       } catch {
         // stream error/disconnect — retry after a delay (unless unloaded)
-        if (aborted) {
-          return
-        }
-        setTimeout(() => {
+      }
+      if (!aborted) {
+        retryTimer = setTimeout(() => {
           void subscribeAndHandleEvents()
         }, EVENT_RETRY_DELAY_MS)
       }
@@ -418,19 +455,24 @@ export default define({
      * - session.created — record directory, invalidate context cache
      * - session.text.ended — capture complete assistant text as observation
      * - session.execution.succeeded / session.compaction.ended — summarize
-     * - session.deleted — complete the session on the worker
+     * - session.deleted — release local state; the worker self-completes
      */
-    async function handleEvent(event: any): Promise<void> {
+    async function handleEvent(event: StreamEvent): Promise<void> {
+      if (event.location && event.location.directory !== defaultDirectory) {
+        return
+      }
       switch (event.type) {
         case 'session.created': {
-          const data = event.data
+          const { data } = event
           if (!data?.sessionID) {
             return
           }
           const directory: unknown = data.location?.directory
           if (typeof directory === 'string' && directory) {
+            if (directory !== defaultDirectory) {
+              return
+            }
             sessionDirs.set(data.sessionID, directory)
-            defaultDirectory = directory
           }
           // Invalidate context cache so the new session fetches fresh context
           // (includes summaries from previous sessions)
@@ -440,10 +482,13 @@ export default define({
         }
 
         case 'session.text.ended': {
-          const data = event.data
+          const { data } = event
           const sessionId: unknown = data?.sessionID
           const text: unknown = data?.text
           if (typeof sessionId !== 'string' || typeof text !== 'string' || !text) {
+            return
+          }
+          if (!(await loadSessionLocation(sessionId))) {
             return
           }
           sessionAssistantTexts.set(sessionId, text)
@@ -456,7 +501,8 @@ export default define({
               sessionId,
               'assistant_message',
               { messageId: data.assistantMessageID },
-              sanitized
+              sanitized,
+              `${data.assistantMessageID}:${data.ordinal}`
             )
           }
           return
@@ -471,11 +517,15 @@ export default define({
           if (!(await checkWorker())) {
             return
           }
+          if (!initializedSessions.has(sessionId)) {
+            return
+          }
           try {
             await WorkerClient.summarize(
               sessionId,
               sessionUserTexts.get(sessionId) || '',
-              sessionAssistantTexts.get(sessionId) || ''
+              sessionAssistantTexts.get(sessionId) || '',
+              { observedModel: sessionModels.get(sessionId) }
             )
           } catch {
             // silently fail
@@ -489,15 +539,12 @@ export default define({
             return
           }
           initializedSessions.delete(sessionId)
+          sessionInits.delete(sessionId)
           contextCache.delete(sessionId)
           sessionDirs.delete(sessionId)
           sessionUserTexts.delete(sessionId)
           sessionAssistantTexts.delete(sessionId)
-          try {
-            await WorkerClient.completeSession(sessionId)
-          } catch {
-            // silently fail
-          }
+          sessionModels.delete(sessionId)
           return
         }
 
@@ -512,6 +559,15 @@ export default define({
     // Stop the event loop + retry timer when the plugin is unloaded/reloaded.
     return () => {
       aborted = true
+      controller.abort()
+      clearTimeout(retryTimer)
+      initializedSessions.clear()
+      sessionInits.clear()
+      contextCache.clear()
+      sessionDirs.clear()
+      sessionUserTexts.clear()
+      sessionAssistantTexts.clear()
+      sessionModels.clear()
     }
   },
 })
