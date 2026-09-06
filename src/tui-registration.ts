@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 const PACKAGE_NAME = '@ephemushroom/opencode-claude-mem'
-const CLI_ENTRY = `${PACKAGE_NAME}/cli`
+const SIDEBAR_ENTRIES = [PACKAGE_NAME, `${PACKAGE_NAME}/cli`, `${PACKAGE_NAME}/tui`] as const
 
 export type TuiRegistrationResult =
   | 'added'
@@ -36,9 +36,30 @@ function pluginEntries(config: Record<string, unknown>): string[] {
   return plugin.filter((entry): entry is string => typeof entry === 'string')
 }
 
-function v2PluginEntries(config: Record<string, unknown>): unknown[] {
+type CliEntry = string | { readonly package: string; readonly options?: Record<string, unknown> }
+
+function isCliEntry(entry: unknown): entry is CliEntry {
+  if (typeof entry === 'string') {
+    return true
+  }
+  if (typeof entry !== 'object' || entry === null || !('package' in entry)) {
+    return false
+  }
+  return (
+    typeof entry.package === 'string' &&
+    (!('options' in entry) ||
+      (typeof entry.options === 'object' &&
+        entry.options !== null &&
+        !Array.isArray(entry.options)))
+  )
+}
+
+function v2PluginEntries(config: Record<string, unknown>): CliEntry[] | null {
   const { plugins } = config
-  return Array.isArray(plugins) ? plugins : []
+  if (plugins === undefined) {
+    return []
+  }
+  return Array.isArray(plugins) && plugins.every(isCliEntry) ? plugins : null
 }
 
 function isOwnEntry(entry: string): boolean {
@@ -120,12 +141,22 @@ export function ensureCliPluginEntry(): TuiRegistrationResult {
     }
 
     const plugins = v2PluginEntries(config)
-    if (plugins.some((entry) => typeof entry === 'string' && isOwnEntry(entry))) {
+    if (!plugins) {
+      return 'malformed'
+    }
+    if (
+      plugins.some((entry) => {
+        const specifier = typeof entry === 'string' ? entry : entry.package
+        return SIDEBAR_ENTRIES.some(
+          (name) => specifier === name || specifier.startsWith(`${name}@`)
+        )
+      })
+    ) {
       return 'already-present'
     }
 
     mkdirSync(configDir, { recursive: true })
-    const next = { ...config, plugins: [...plugins, CLI_ENTRY] }
+    const next = { ...config, plugins: [...plugins, PACKAGE_NAME] }
     writeFileSync(cliJsonPath, `${JSON.stringify(next, null, 2)}\n`)
     return 'added'
   } catch {
