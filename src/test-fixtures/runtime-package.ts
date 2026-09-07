@@ -18,6 +18,27 @@ export async function serveRuntimePackage(root: string) {
     async fetch(request) {
       const url = new URL(request.url)
       const path = decodeURIComponent(url.pathname)
+      if (path === '/mem-tui-fixture' || path.startsWith('/mem-tui-fixture/')) {
+        const version = {
+          name: 'mem-tui-fixture',
+          version: '1.0.0',
+          type: 'module',
+          exports: { './tui': './open-session.js' },
+          dist: { tarball: `${url.origin}/helper.tgz` },
+        }
+        return Response.json(
+          path === '/mem-tui-fixture'
+            ? {
+                name: version.name,
+                'dist-tags': { latest: '1.0.0' },
+                versions: { '1.0.0': version },
+              }
+            : version
+        )
+      }
+      if (path === '/helper.tgz') {
+        return new Response(Bun.file(join(root, 'helper.tgz')))
+      }
       if (path === '/plugin.tgz') {
         downloads++
         return new Response(Bun.file(archive))
