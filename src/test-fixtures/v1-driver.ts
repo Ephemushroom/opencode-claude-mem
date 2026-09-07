@@ -69,13 +69,13 @@ try {
     experimental_workspace: { register() {} },
   })
 
-  const sendPrompt = async () => {
+  const sendPrompt = async (id = 'user-fixture', text = 'fixture-user') => {
     assert.ok(hooks['chat.message'])
     await hooks['chat.message'](
       { sessionID, model: { providerID: 'fixture-provider', modelID } },
       {
         message: {
-          id: 'user-fixture',
+          id,
           sessionID,
           role: 'user',
           time: { created: 1 },
@@ -86,9 +86,9 @@ try {
           {
             id: 'part-fixture',
             sessionID,
-            messageID: 'user-fixture',
+            messageID: id,
             type: 'text',
-            text: 'fixture-user',
+            text,
           },
         ],
       }
@@ -96,6 +96,66 @@ try {
   }
 
   switch (scenario) {
+    case 'assistant-transition':
+    case 'assistant-repeat': {
+      await sendPrompt()
+      assert.ok(hooks.event)
+      await hooks.event({
+        event: {
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'assistant-fixture',
+              sessionID,
+              role: 'assistant',
+              parentID: 'user-fixture',
+              time: { created: 1 },
+              modelID,
+              providerID: 'fixture-provider',
+              mode: 'build',
+              path: { cwd: configDir, root: configDir },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+          },
+        },
+      })
+      await sendPrompt(scenario === 'assistant-repeat' ? 'user-fixture' : 'next-user')
+      await hooks.event({ event: { type: 'session.idle', properties: { sessionID } } })
+      const lifecycle = writes.filter(
+        (item) => item.path.endsWith('/init') || item.path.endsWith('/observations')
+      )
+      assert.deepEqual(
+        lifecycle.map((item) => item.path),
+        scenario === 'assistant-repeat'
+          ? ['/api/sessions/init', '/api/sessions/observations']
+          : ['/api/sessions/init', '/api/sessions/observations', '/api/sessions/init']
+      )
+      break
+    }
+    case 'turns-private': {
+      await Promise.all([sendPrompt(), sendPrompt()])
+      await sendPrompt('second-user')
+      await sendPrompt('second-user')
+      assert.deepEqual(
+        writes.filter((item) => item.path.endsWith('/init')).map((item) => item.body.prompt),
+        ['fixture-user', 'fixture-user']
+      )
+      await sendPrompt('private-user', '<private>private prompt</private>')
+      assert.ok(hooks['tool.execute.after'] && hooks.event)
+      await hooks['tool.execute.after'](
+        { sessionID, callID: 'private-call', tool: 'read', args: {} },
+        { title: '', output: 'private result', metadata: {} }
+      )
+      await hooks.event({ event: { type: 'session.idle', properties: { sessionID } } })
+      assert.equal(
+        writes.filter(
+          (item) => item.path.endsWith('/observations') || item.path.endsWith('/summarize')
+        ).length,
+        0
+      )
+      break
+    }
     case 'deleted': {
       await sendPrompt()
       assert.ok(hooks.event)

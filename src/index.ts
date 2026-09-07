@@ -8,8 +8,13 @@ import {
   truncateUtf8Bytes,
 } from './shared'
 import { type Plugin, type PluginModule, tool } from '@opencode-ai/plugin'
+import { memoryTurn, resumedV1Turn } from './memory-turn'
+import { FileContext } from './file-context'
+import { MemorySessions } from './memory-session'
+import { MemoryWorker } from './memory-worker'
 import { WorkerClient } from './worker-client'
 import { ensureTuiPluginEntry } from './tui-registration'
+import { resolveMemoryOptions } from './memory-options'
 
 const ASSISTANT_FLUSH_DEBOUNCE_MS = 250
 
@@ -27,8 +32,13 @@ const ASSISTANT_FLUSH_DEBOUNCE_MS = 250
  * Memory context is automatically injected into every conversation via system prompt.
  * No manual commands needed - the plugin works transparently in the background.
  */
-export const ClaudeMemPlugin: Plugin = async (ctx) => {
+export const ClaudeMemPlugin: Plugin = async (ctx, options) => {
   const { project, directory, client } = ctx
+  const config = resolveMemoryOptions(options)
+  const memory = new MemorySessions(config)
+  const files = new FileContext(config.fileContext)
+  const resumed = new Map<string, Promise<void>>()
+  const subagentSessions = new Set<string>()
 
   ensureTuiPluginEntry()
 
@@ -50,21 +60,6 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     } catch {
       // TUI not available or API changed — ignore
     }
-  }
-
-  // Session-level context cache — fetched once per session, like Claude Code's SessionStart
-  let contextCache: string | null | undefined = undefined
-
-  /** Fetch context once per session (cached after first call) */
-  async function getCachedContext(): Promise<string | null> {
-    if (contextCache !== undefined) {
-      return contextCache
-    }
-    const context = await WorkerClient.getContext(projectName)
-    if (context !== null) {
-      contextCache = context
-    }
-    return context
   }
 
   // Worker health checked lazily — avoid calling client.tui during plugin init
@@ -97,7 +92,6 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
   }
 
   let currentSessionId: string | null = null
-  const initializedSessions = new Set<string>()
 
   /**
    * Per-session debounced assistant-message buffer.
@@ -113,8 +107,17 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     timer: ReturnType<typeof setTimeout> | null
   }
   const assistantBuffers = new Map<string, AssistantBuffer>()
+  const assistantFlushes = new Map<string, Promise<void>>()
 
   async function flushAssistantBuffer(sessionId: string): Promise<void> {
+    const existing = assistantFlushes.get(sessionId)
+    if (existing) {
+      await existing
+    }
+    if (!memory.canCapture(sessionId)) {
+      discardAssistantBuffer(sessionId)
+      return
+    }
     const buf = assistantBuffers.get(sessionId)
     if (!buf || !buf.messageId) {
       return
@@ -128,20 +131,30 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
     // Reset BEFORE awaiting so concurrent updates start fresh.
     buf.messageId = null
 
-    try {
-      const text = await fetchAssistantMessageText(sessionId, messageId)
-      const sanitized = truncateUtf8Bytes(stripTaggedContent(text), MAX_OBSERVATION_BYTES)
-      if (sanitized) {
-        await WorkerClient.sendObservation(
-          sessionId,
-          'assistant_message',
-          { messageId },
-          sanitized,
-          projectRoot
-        )
+    const pending = (async () => {
+      try {
+        const text = await fetchAssistantMessageText(sessionId, messageId)
+        const sanitized = truncateUtf8Bytes(stripTaggedContent(text), MAX_OBSERVATION_BYTES)
+        if (sanitized) {
+          await WorkerClient.sendObservation(
+            sessionId,
+            'assistant_message',
+            { messageId },
+            sanitized,
+            projectRoot
+          )
+        }
+      } catch {
+        // silently fail
       }
-    } catch {
-      // silently fail
+    })()
+    assistantFlushes.set(sessionId, pending)
+    try {
+      await pending
+    } finally {
+      if (assistantFlushes.get(sessionId) === pending) {
+        assistantFlushes.delete(sessionId)
+      }
     }
   }
 
@@ -172,34 +185,34 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
    * Idempotent — safe to call multiple times for the same session.
    * P2: Now accepts an optional prompt parameter (the actual user message).
    */
-  async function ensureSessionInit(sessionId: string, prompt?: string): Promise<boolean> {
-    if (initializedSessions.has(sessionId)) {
-      return true
-    }
-
-    const isHealthy = await checkWorkerAndToast()
-    if (!isHealthy) {
+  async function ensureSessionInit(sessionId: string): Promise<boolean> {
+    if (memory.isDeleted(sessionId)) {
       return false
     }
-
     try {
-      // Only treat the session as initialized when the worker actually
-      // persisted it. sessionInit returns null on any failure (worker
-      // mid-boot, non-200, network error) — marking it initialized anyway
-      // would skip the init retry forever, leaving user_prompts empty and
-      // repeating "no user_prompts row for prompt #0" on every observation.
-      const result = await WorkerClient.sessionInit(
-        sessionId,
-        projectName,
-        prompt || 'SESSION_START'
-      )
-      if (!result) {
+      if (!memory.hasTurn(sessionId)) {
+        let pending = resumed.get(sessionId)
+        if (!pending) {
+          pending = (async () => {
+            const result = await client.session.messages({ path: { id: sessionId } })
+            const turn = resumedV1Turn(result.data)
+            if (turn && !memory.hasTurn(sessionId) && resumed.has(sessionId)) {
+              memory.select(sessionId, turn)
+            }
+          })()
+          resumed.set(sessionId, pending)
+        }
+        await pending
+        if (!memory.hasTurn(sessionId)) {
+          resumed.delete(sessionId)
+        }
+      }
+      if (!memory.hasTurn(sessionId) || !(await checkWorkerAndToast())) {
         return false
       }
-      initializedSessions.add(sessionId)
-      currentSessionId = sessionId
-      return true
+      return await memory.register(sessionId, projectName)
     } catch {
+      resumed.delete(sessionId)
       return false
     }
   }
@@ -261,6 +274,16 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
 
   return {
     tool: {
+      'mem-save': tool({
+        description:
+          'Save an explicit memory to Claude-Mem. Private and injected context are removed. Check an uncertain result before retrying.',
+        args: {
+          text: tool.schema.string().min(1).max(MAX_OBSERVATION_BYTES),
+          title: tool.schema.string().max(MAX_OBSERVATION_BYTES).optional(),
+          project: tool.schema.string().min(1).optional(),
+        },
+        execute: async (input) => MemoryWorker.save(input, projectName),
+      }),
       'mem-search': tool({
         description:
           'Search Claude-Mem persistent memory. Supports query, project, platformSource, type, obs_type, dateStart, dateEnd, offset, and orderBy filters.',
@@ -423,9 +446,12 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
           // Do NOT call ensureSessionInit — that would use "SESSION_START" as prompt.
           // Let chat.message handle init with the real user prompt.
           currentSessionId = sessionId
+          if (event.properties?.info?.parentID) {
+            subagentSessions.add(sessionId)
+          }
           // Invalidate context cache so new session fetches fresh context
           // (includes summaries from previous sessions)
-          contextCache = undefined
+          memory.invalidate(sessionId)
           await checkWorkerAndToast()
           return
         }
@@ -496,7 +522,11 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
           if (!sessionId) {
             return
           }
+          memory.invalidate(sessionId)
           await flushAssistantBuffer(sessionId)
+          if (!(await ensureSessionInit(sessionId))) {
+            return
+          }
 
           const isHealthy = await checkWorkerAndToast()
           if (!isHealthy) {
@@ -518,6 +548,9 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
             return
           }
           await flushAssistantBuffer(sessionId)
+          if (!(await ensureSessionInit(sessionId))) {
+            return
+          }
 
           try {
             const { user, assistant, observedModel } = await fetchLastMessages(sessionId)
@@ -539,7 +572,10 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
           }
           await flushAssistantBuffer(sessionId)
           discardAssistantBuffer(sessionId)
-          initializedSessions.delete(sessionId)
+          memory.delete(sessionId)
+          files.delete(sessionId)
+          resumed.delete(sessionId)
+          subagentSessions.delete(sessionId)
           if (currentSessionId === sessionId) {
             currentSessionId = null
           }
@@ -561,7 +597,24 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       const sessionId = input.sessionID
       if (sessionId) {
         const userPrompt = extractTextFromParts(output.parts)
-        await ensureSessionInit(sessionId, userPrompt || undefined)
+        const id = input.messageID ?? output.message.id
+        if (!id) {
+          return
+        }
+        if (!memory.hasMessage(sessionId, id)) {
+          // Finish the old turn before advancing the Worker's prompt number.
+          await flushAssistantBuffer(sessionId)
+        }
+        currentSessionId = sessionId
+        memory.select(
+          sessionId,
+          memoryTurn(
+            id,
+            userPrompt,
+            output.parts.some((part) => part.type === 'file')
+          )
+        )
+        await ensureSessionInit(sessionId)
       }
     },
 
@@ -570,7 +623,10 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
      * P0: Uses /api/context/inject for rich pre-formatted context instead of /api/search.
      */
     'experimental.chat.system.transform': async (input, output) => {
-      const sessionId = (input as any).sessionID
+      const sessionId = input.sessionID ?? currentSessionId
+      if (!sessionId) {
+        return
+      }
 
       // Try to init session if we haven't yet
       if (sessionId) {
@@ -583,7 +639,14 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       }
 
       try {
-        const context = await getCachedContext()
+        const base = await memory.context(sessionId, projectName)
+        const semantic = await memory.semantic(sessionId, projectName)
+        const context = [base, semantic].filter(Boolean).join('\n\n')
+        for (let i = output.system.length - 1; i >= 0; i--) {
+          if (output.system[i].startsWith('<claude-mem-context>')) {
+            output.system.splice(i, 1)
+          }
+        }
         if (context) {
           output.system.push(
             `<claude-mem-context>\n[Claude-Mem] Memory Active. Previous Context:\n${context}\n</claude-mem-context>`
@@ -598,7 +661,8 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
      * Hook: Preserve memory context during compaction
      */
     'experimental.session.compacting': async (input, output) => {
-      const sessionId = (input as any).sessionID
+      const sessionId = input.sessionID
+      memory.invalidate(sessionId)
 
       if (sessionId) {
         await ensureSessionInit(sessionId)
@@ -610,7 +674,7 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
       }
 
       try {
-        const context = await getCachedContext()
+        const context = await memory.context(sessionId, projectName)
         if (context) {
           output.context.push(
             `<claude-mem-context>\n[Claude-Mem] Memory Active. Previous Context:\n${context}\n</claude-mem-context>`
@@ -655,6 +719,14 @@ export const ClaudeMemPlugin: Plugin = async (ctx) => {
           projectRoot,
           input.callID
         )
+        const history = subagentSessions.has(sessionId)
+          ? ''
+          : await files.read(
+              sessionId,
+              { tool: input.tool, args: input.args },
+              { directory: projectRoot, project: projectName }
+            )
+        output.output += history
       } catch {
         // Silently fail - don't block tool execution
       }

@@ -3,6 +3,9 @@ import { join } from 'node:path'
 
 for (const scenario of [
   'deleted',
+  'turns-private',
+  'assistant-transition',
+  'assistant-repeat',
   'tool-id',
   'observed-model',
   'offline',
