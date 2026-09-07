@@ -8,8 +8,13 @@ import {
   stripTaggedContent,
   truncateUtf8Bytes,
 } from './shared'
+import { FileContext } from './file-context'
+import { MemorySessions } from './memory-session'
+import { MemoryWorker } from './memory-worker'
 import { WorkerClient } from './worker-client'
+import { deliveredTurn } from './memory-turn'
 import { ensureCliPluginEntry } from './tui-registration'
+import { resolveMemoryOptions } from './memory-options'
 
 const EVENT_RETRY_DELAY_MS = 10_000
 type StreamEvent =
@@ -43,11 +48,12 @@ export default define({
     ensureCliPluginEntry()
 
     const controller = new AbortController()
-    const initializedSessions = new Set<string>()
-    const sessionInits = new Map<string, Promise<boolean>>()
-    // Per-session context cache — fetched once per session (mirrors V1 but
-    // keyed by session because the V2 server hosts multiple sessions).
-    const contextCache = new Map<string, string>()
+    const config = resolveMemoryOptions(ctx.options)
+    const memory = new MemorySessions(config)
+    const files = new FileContext(config.fileContext)
+    const admitted = new Map<string, Set<string>>()
+    const compactions = new Map<string, string>()
+    const subagentSessions = new Set<string>()
     const sessionDirs = new Map<string, string>()
     const sessionUserTexts = new Map<string, string>()
     const sessionAssistantTexts = new Map<string, string>()
@@ -59,16 +65,26 @@ export default define({
     }
 
     async function loadSessionLocation(sessionId: string): Promise<boolean> {
+      if (memory.isDeleted(sessionId)) {
+        return false
+      }
       if (sessionDirs.has(sessionId)) {
         return true
       }
       try {
         const session = await ctx.session.get({ sessionID: sessionId })
         // The event stream is server-wide; never capture another location's sessions.
-        if (controller.signal.aborted || session.location.directory !== defaultDirectory) {
+        if (
+          controller.signal.aborted ||
+          memory.isDeleted(sessionId) ||
+          session.location.directory !== defaultDirectory
+        ) {
           return false
         }
         sessionDirs.set(sessionId, session.location.directory)
+        if ('parentID' in session && session.parentID) {
+          subagentSessions.add(sessionId)
+        }
         return true
       } catch {
         return false
@@ -87,48 +103,15 @@ export default define({
      * Idempotent session init with the worker (mirrors V1). Only marks the
      * session initialized when the worker actually persisted it.
      */
-    async function ensureSessionInit(sessionId: string, prompt?: string): Promise<boolean> {
-      if (initializedSessions.has(sessionId)) {
-        return true
+    async function ensureSessionInit(sessionId: string): Promise<boolean> {
+      if (
+        !memory.hasTurn(sessionId) ||
+        !(await checkWorker()) ||
+        !(await loadSessionLocation(sessionId))
+      ) {
+        return false
       }
-      const existing = sessionInits.get(sessionId)
-      if (existing) {
-        return existing
-      }
-      const pending = (async () => {
-        if (!(await checkWorker()) || !(await loadSessionLocation(sessionId))) {
-          return false
-        }
-        const result = await WorkerClient.sessionInit(
-          sessionId,
-          getProjectName(sessionId),
-          prompt || 'SESSION_START'
-        )
-        if (!result || controller.signal.aborted || !sessionInits.has(sessionId)) {
-          return false
-        }
-        initializedSessions.add(sessionId)
-        return true
-      })()
-      sessionInits.set(sessionId, pending)
-      try {
-        return await pending
-      } finally {
-        if (sessionInits.get(sessionId) === pending) {
-          sessionInits.delete(sessionId)
-        }
-      }
-    }
-
-    /** Context cache per session — invalidated on session.created. */
-    async function getCachedContext(sessionId: string): Promise<string | null> {
-      if (!contextCache.has(sessionId)) {
-        const context = await WorkerClient.getContext(getProjectName(sessionId))
-        if (context !== null && !controller.signal.aborted && sessionDirs.has(sessionId)) {
-          contextCache.set(sessionId, context)
-        }
-      }
-      return contextCache.get(sessionId) ?? null
+      return memory.register(sessionId, getProjectName(sessionId))
     }
 
     async function sendObservation(
@@ -153,29 +136,6 @@ export default define({
       } catch {
         // silently fail
       }
-    }
-
-    /** Last user text in the message list (V2 `Message.content` parts). */
-    function extractLastUserText(messages: unknown[]): string {
-      if (!Array.isArray(messages)) {
-        return ''
-      }
-      for (const message of messages.toReversed()) {
-        if (
-          message &&
-          typeof message === 'object' &&
-          'role' in message &&
-          message.role === 'user' &&
-          'content' in message &&
-          Array.isArray(message.content)
-        ) {
-          const text = extractTextFromParts(message.content)
-          if (text) {
-            return text
-          }
-        }
-      }
-      return ''
     }
 
     /** Normalize a V2 Tool.Result ({ output?, content? }) to text. */
@@ -208,6 +168,22 @@ export default define({
      * the real user prompt (from the message list) and injects the cached
      * memory context into the system parts.
      */
+    await ctx.session.hook('prompt', (event) => {
+      if (controller.signal.aborted || memory.isDeleted(event.sessionID)) {
+        return
+      }
+      let ids = admitted.get(event.sessionID)
+      if (!ids) {
+        ids = new Set()
+        admitted.set(event.sessionID, ids)
+      }
+      ids.add(event.messageID)
+    })
+    await ctx.session.hook('model.request', (event) => {
+      if (event.kind === 'compaction') {
+        memory.invalidate(event.sessionID)
+      }
+    })
     await ctx.session.hook('context', async (event) => {
       const sessionId = event.sessionID
       if (!sessionId) {
@@ -217,13 +193,44 @@ export default define({
         return
       }
       sessionModels.set(sessionId, event.model.id)
-      sessionUserTexts.set(sessionId, extractLastUserText(event.messages))
-      await ensureSessionInit(sessionId, sessionUserTexts.get(sessionId))
-      if (!(await checkWorker())) {
-        return
-      }
       try {
-        const context = await getCachedContext(sessionId)
+        // The prompt hook sees queued/admitted input, not consumption. Context
+        // records distinguish real users from synthetic messages and retain IDs.
+        const messages = await ctx.session.context({ sessionID: sessionId })
+        if (controller.signal.aborted || !sessionDirs.has(sessionId)) {
+          return
+        }
+        const compaction = messages.findLast((message) => message.type === 'compaction')
+        if (compaction && compactions.get(sessionId) !== compaction.id) {
+          compactions.set(sessionId, compaction.id)
+          memory.invalidate(sessionId)
+        }
+        for (const message of messages) {
+          if (admitted.get(sessionId)?.has(message.id)) {
+            const consumed = deliveredTurn([message])
+            if (consumed && memory.select(sessionId, consumed)) {
+              sessionAssistantTexts.delete(sessionId)
+            }
+            admitted.get(sessionId)?.delete(message.id)
+          }
+        }
+        const turn = deliveredTurn(messages)
+        if (turn) {
+          if (memory.select(sessionId, turn)) {
+            sessionAssistantTexts.delete(sessionId)
+          }
+          sessionUserTexts.set(sessionId, turn.text)
+        }
+        await ensureSessionInit(sessionId)
+        if (!(await checkWorker())) {
+          return
+        }
+        const base = await memory.context(sessionId, getProjectName(sessionId))
+        const semantic = await memory.semantic(sessionId, getProjectName(sessionId))
+        const context = [base, semantic].filter(Boolean).join('\n\n')
+        event.system = event.system.filter(
+          (part) => part.type !== 'text' || !part.text.startsWith('<claude-mem-context>')
+        )
         if (context) {
           event.system.push({
             type: 'text',
@@ -258,6 +265,30 @@ export default define({
         MAX_OBSERVATION_BYTES
       )
       await sendObservation(sessionId, event.tool, sanitizedInput, sanitizedOutput, event.id)
+      if (
+        event.status === 'completed' &&
+        memory.canCapture(sessionId) &&
+        !subagentSessions.has(sessionId)
+      ) {
+        const history = await files.read(
+          sessionId,
+          { tool: event.tool, args: event.input },
+          {
+            directory: sessionDirs.get(sessionId) || defaultDirectory,
+            project: getProjectName(sessionId),
+          }
+        )
+        if (history) {
+          if (typeof event.result.content === 'string') {
+            event.result = { ...event.result, content: event.result.content + history }
+          } else if (Array.isArray(event.result.content)) {
+            event.result = {
+              ...event.result,
+              content: [...event.result.content, { type: 'text', text: history }],
+            }
+          }
+        }
+      }
     })
 
     /**
@@ -265,6 +296,25 @@ export default define({
      * provider (default `codemode: true` would only expose them via `execute`).
      */
     await ctx.tool.transform((tools) => {
+      tools.add({
+        name: 'mem-save',
+        description:
+          'Save explicit memory to Claude-Mem. Private and injected context are removed. Check uncertain results before retrying.',
+        input: {
+          type: 'object',
+          properties: {
+            text: { type: 'string', minLength: 1, maxLength: MAX_OBSERVATION_BYTES },
+            title: { type: 'string', maxLength: MAX_OBSERVATION_BYTES },
+            project: { type: 'string', minLength: 1 },
+          },
+          required: ['text'],
+          additionalProperties: false,
+        },
+        options: { codemode: false },
+        execute: async (input: unknown, toolContext) => ({
+          content: await MemoryWorker.save(input, getProjectName(toolContext.sessionID)),
+        }),
+      })
       tools.add({
         name: 'mem-search',
         description:
@@ -468,6 +518,9 @@ export default define({
             return
           }
           const directory: unknown = data.location?.directory
+          if ('parentID' in data && typeof data.parentID === 'string') {
+            subagentSessions.add(data.sessionID)
+          }
           if (typeof directory === 'string' && directory) {
             if (directory !== defaultDirectory) {
               return
@@ -476,7 +529,7 @@ export default define({
           }
           // Invalidate context cache so the new session fetches fresh context
           // (includes summaries from previous sessions)
-          contextCache.delete(data.sessionID)
+          memory.invalidate(data.sessionID)
           await checkWorker()
           return
         }
@@ -491,7 +544,10 @@ export default define({
           if (!(await loadSessionLocation(sessionId))) {
             return
           }
-          sessionAssistantTexts.set(sessionId, text)
+          if (!memory.canCapture(sessionId)) {
+            return
+          }
+          sessionAssistantTexts.set(sessionId, stripTaggedContent(text))
           if (!(await checkWorker())) {
             return
           }
@@ -514,10 +570,13 @@ export default define({
           if (typeof sessionId !== 'string') {
             return
           }
+          if (event.type === 'session.compaction.ended') {
+            memory.invalidate(sessionId)
+          }
           if (!(await checkWorker())) {
             return
           }
-          if (!initializedSessions.has(sessionId)) {
+          if (!memory.canCapture(sessionId)) {
             return
           }
           try {
@@ -538,9 +597,11 @@ export default define({
           if (typeof sessionId !== 'string') {
             return
           }
-          initializedSessions.delete(sessionId)
-          sessionInits.delete(sessionId)
-          contextCache.delete(sessionId)
+          memory.delete(sessionId)
+          files.delete(sessionId)
+          admitted.delete(sessionId)
+          compactions.delete(sessionId)
+          subagentSessions.delete(sessionId)
           sessionDirs.delete(sessionId)
           sessionUserTexts.delete(sessionId)
           sessionAssistantTexts.delete(sessionId)
@@ -561,9 +622,11 @@ export default define({
       aborted = true
       controller.abort()
       clearTimeout(retryTimer)
-      initializedSessions.clear()
-      sessionInits.clear()
-      contextCache.clear()
+      memory.clear()
+      files.clear()
+      admitted.clear()
+      compactions.clear()
+      subagentSessions.clear()
       sessionDirs.clear()
       sessionUserTexts.clear()
       sessionAssistantTexts.clear()

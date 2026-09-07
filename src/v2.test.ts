@@ -3,6 +3,7 @@ import { join } from 'node:path'
 
 test.each([
   'metadata',
+  'memory',
   'recovery',
   'context-recovery',
   'resumed-location',

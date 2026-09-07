@@ -1,3 +1,4 @@
+import { type DeliveredFixture, checkV2Memory } from './v2-memory-checks'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { AbsolutePath } from '@opencode-ai/schema/schema'
 import type { Context } from '@opencode-ai/plugin-v2/promise/plugin'
@@ -12,6 +13,9 @@ const scenario = process.argv.at(2)
 const configDir = await mkdtemp(join(tmpdir(), 'mem-v2-'))
 const directory = '/fixture/project-a'
 const sessionID = 'ses_fixture'
+const delivered: DeliveredFixture = {
+  messages: [{ type: 'user', id: 'user-fixture', text: 'fixture-user', time: { created: 1 } }],
+}
 let healthy = true
 let contextAvailable = true
 const requests: { path: string; project: string | null; body?: Record<string, unknown> }[] = []
@@ -63,8 +67,12 @@ const ended = Promise.withResolvers<void>()
 const events: { event: StreamEvent; done: ReturnType<typeof Promise.withResolvers<void>> }[] = []
 const subscription: { signal?: AbortSignal } = {}
 const ctx = hostStub<Context>({
+  options: {},
   location: hostStub<Context['location']>({ directory: AbsolutePath.make(directory) }),
   session: hostStub<Context['session']>({
+    async context() {
+      return delivered.messages
+    },
     async hook(name, callback) {
       hooks.set(name, async (input) => {
         await Reflect.apply(callback, undefined, [input])
@@ -155,6 +163,18 @@ const toolHook = hooks.get('execute.after')
 assert.ok(contextHook && toolHook && cleanup)
 try {
   switch (scenario) {
+    case 'memory': {
+      await checkV2Memory(hooks, requests, delivered)
+      await publish({
+        id: 'evt_private',
+        type: 'session.execution.succeeded',
+        created: 0,
+        durable: { aggregateID: sessionID, seq: 1, version: 1 },
+        data: { sessionID },
+      })
+      assert.equal(requests.filter((r) => r.path.endsWith('/summarize')).length, 0)
+      break
+    }
     case 'metadata': {
       await contextHook(contextInput())
       await toolHook({
