@@ -17,7 +17,11 @@ bridges OpenCode hooks to the Claude-Mem worker service.
   - `src/cli.ts` — OpenCode **V2** TUI plugin (Memory sidebar, `Plugin.define` via `@opencode-ai/plugin-v2/tui/plugin`)
   - `src/worker-client.ts` — HTTP client (shared by all entrypoints)
   - `src/sidebar-model.ts` — pure sidebar view model shared by both TUI entrypoints
-  - `src/shared.ts` — pure helpers shared by the server entrypoints
+- `src/shared.ts` — pure helpers shared by the server entrypoints
+- Memory parity: `memory-options.ts` resolves bounded configuration;
+  `memory-turn.ts` identifies real consumed prompts; `memory-session.ts` owns per-session
+  registration/context state; `memory-worker.ts` supplies static enrichment HTTP calls;
+  `file-context.ts` appends bounded historical context after original observation capture.
 - **Output**: `dist/` (compiled JS + declarations)
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`, `.github/workflows/release.yml`)
 
@@ -151,6 +155,10 @@ config works in both versions through two static bridges:
   `server` and `tui`, but ignores `setup`; V2 requires `id` and `setup` (or `effect`).
 - Bridges import adapter definitions but never run setup at module evaluation.
   Build them with imports external so they reference the separate adapter bundles.
+- The emitted TUI bridge must import `./tui.js` and `./cli.js` with explicit
+  extensions. `build-tui-bridge.ts` preserves these paths for the host's recursive
+  runtime-module prescan; extensionless imports bypass host Solid/OpenTUI singletons
+  and can cause `No renderer found`. The packed ConPTY fixture verifies rendering.
 
 **V1 (`src/index.ts`)** — exports a single async factory function
 (`ClaudeMemPlugin`) that:
@@ -168,8 +176,9 @@ V1 hook handlers:
 **V2 (`src/v2.ts`)** — `Plugin.define({ id: 'claude-mem', setup })` via
 `@opencode-ai/plugin-v2/promise/plugin` (deep import — the root entry pulls in
 effect/schema, the deep path bundles to ~28 KB). Setup registers:
-- `ctx.session.hook('context')` — init session with real user prompt (from
-  `event.messages`) + push `<claude-mem-context>` SystemPart into `event.system`
+- `ctx.session.hook('prompt')` records admission IDs only. `context` reads delivered
+  `ctx.session.context` records, registers new real IDs, and injects base plus optional
+  semantic memory. Do not register queued prompts at admission or dedupe by text.
 - `ctx.tool.hook('execute.after')` — capture tool observations (`event.result`
   on `status: 'completed'`, `event.error` on `'error'`)
 - `ctx.tool.transform((tools) => tools.add(...))` — the `mem-*` tools with
@@ -221,8 +230,15 @@ reads. Both adapters forward call IDs (`tool_use_id`) and observed model metadat
 - **Platform source**: Worker write payloads include `platformSource: "opencode"` for attribution
 - **Worker endpoint**: Resolve host/port from env, then `~/.claude-mem/settings.json`, then `127.0.0.1:37777`
 - **Deferred toast**: Never call `client.tui.showToast()` during plugin init — TUI isn't ready, crashes OpenCode
-- **Idempotent init**: `ensureSessionInit()` tracks initialized sessions in a `Set` — safe to call repeatedly
-- **Context caching**: `getCachedContext()` fetches context once per OpenCode session and resets on `session.created`
+- **Turn identity**: `MemorySessions` serializes registration and dedupes successful message IDs.
+  Worker v13.24.1 separately dedupes recent identical text; never rewrite prompts to bypass it.
+- **Context caching**: `MemorySessions.context()` is per session and invalidated at compaction;
+  stale in-flight responses cannot repopulate invalidated/deleted state.
+- **Optional enrichment**: semantic injection defaults off, file history on. See README
+  "Memory configuration" before changing precedence, bounds, or either adapter's options.
+  Preserve original read output and capture it before appending historical context.
+- **Manual saves**: sanitize text/title, retain project attribution, never auto-retry an
+  ambiguous write, and keep `mem-save` out of observation capture.
 - **Search tool**: `mem-search` forwards the worker search contract (`query`, `limit`, `project`, `platformSource`, `type`, `obs_type`, `dateStart`, `dateEnd`, `offset`, `orderBy`) and is skipped by observation capture
 - **MCP boundary**: Claude Code plugin MCP is not automatically available in OpenCode; configure MCP separately if `timeline`/`get_observations` are needed
 
