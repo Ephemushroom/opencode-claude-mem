@@ -1,6 +1,6 @@
 {
   "name": "@ephemushroom/opencode-claude-mem",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "OpenCode plugin for Claude-Mem persistent memory system",
   "main": "./dist/package-server.js",
   "types": "./dist/package-server.d.ts",
@@ -31,7 +31,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/index.ts --outfile dist/index.js --target bun --format esm && bun build src/v2.ts --outfile dist/v2.js --target bun --format esm && bun build src/tui.ts --outfile dist/tui.js --target bun --format esm --external @opentui/solid --external solid-js && bun build src/cli.ts --outfile dist/cli.js --target bun --format esm --external @opentui/solid --external solid-js && bun build src/package-server.ts src/package-tui.ts --outdir dist --target bun --format esm --external '*' && tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "build": "bun build src/index.ts --outfile dist/index.js --target bun --format esm && bun build src/v2.ts --outfile dist/v2.js --target bun --format esm && bun build src/tui.ts --outfile dist/tui.js --target bun --format esm --external @opentui/solid --external solid-js && bun build src/cli.ts --outfile dist/cli.js --target bun --format esm --external @opentui/solid --external solid-js && bun build src/package-server.ts --outdir dist --target bun --format esm --external '*' && bun src/build-tui-bridge.ts && tsc -p tsconfig.build.json --emitDeclarationOnly",
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
     "lint": "oxlint",
@@ -72,6 +72,7 @@
     "oxfmt": "^0.33.0",
     "oxlint": "^1.63.0",
     "solid-js": "1.9.14",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "zod": "4.1.8"
   }
 }
