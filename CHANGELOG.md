@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-07
+
+### Added
+
+- Native `mem-save` in both runtimes, with privacy filtering, bounded input and
+  explicit success/failure acknowledgement.
+- Supplementary read-file history with Windows path normalization, per-session
+  deduplication, revision tracking, bounded lookups and fail-open behavior.
+- Opt-in semantic injection configured through V1/V2 plugin options or upstream
+  environment/settings switches. Explicit options take precedence; default is off.
+
+### Fixed
+
+- Emit explicit `.js` adapter imports in the TUI bridge so the host's runtime
+  prescan preserves its renderer singleton, fixing `No renderer found` in the
+  actual OpenCode 2 sidebar. Add packed-host PTY render and mouse-interaction QA.
+- Register each real user message ID instead of only the first prompt in a session.
+  Preserve failed prompts for retry and respect V2 queued-versus-delivered messages.
+- Refresh session-isolated base memory at compaction and reject stale in-flight reads.
+- Flush V1 assistant observations before advancing to a new user turn, without
+  dropping buffers on duplicate callbacks.
+- Harden protected-tag filtering and suppress automatic capture for private/internal turns.
+
 ## [0.5.0] - 2026-09-06
 
 ### Fixed
