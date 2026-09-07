@@ -6,6 +6,9 @@ Persistent memory for [OpenCode](https://opencode.ai), powered by
 **Supports OpenCode 1 and OpenCode 2 with the same package name from v0.5.0.**
 No `/v2` or `/cli` suffix is required. Existing version-specific entries remain compatible.
 
+**v0.6.0** adds per-turn memory tracking, `mem-save`, file history and opt-in semantic
+injection, and fixes the OpenCode 2 sidebar's `No renderer found` crash.
+
 Share the same Claude-Mem worker, database, and memory across your coding
 agents: memories written by Claude Code are visible to OpenCode, and vice
 versa. Previous observations and summaries are injected into new OpenCode
@@ -74,11 +77,12 @@ contract. No `/v2` or `/cli` suffix is needed:
 Both adapters talk to the same Claude-Mem worker, so memory written from V1,
 V2, and Claude Code is shared. The V2 entrypoint covers the same behavior —
 context injection, tool observation capture, the `mem-search`/`mem-timeline`/
-`mem-get-observations` tools, session init/summarize/cleanup via the event
+`mem-get-observations`/`mem-save` tools, per-user-message registration and session summarize/cleanup via the event
 stream.
 
 The bare package is tested with `opencode 1.18.29` and
-`opencode2 0.0.0-beta-19151`; the V2 SDK is pinned because preview APIs can
+`opencode2 0.0.0-beta-19151`; v0.6.0 also passes server and real
+sidebar interaction checks on `0.0.0-beta-19192`. The V2 SDK is pinned because preview APIs can
 change. Unified routing requires **v0.5.0 or later**; the older `0.4.4` package
 does not provide it. Upgrade the package in both server and sidebar configurations.
 Existing `/server`, `/tui`, `/v2`, and `/cli` exports remain supported; replace
@@ -106,7 +110,9 @@ from the server config alone. To register manually, use:
 | Surface | What it looks like |
 |---|---|
 | **System prompt** | `<claude-mem-context>` block with recent observations + session summaries for the current project |
-| **Tools** | `mem-search` → `mem-timeline` → `mem-get-observations` (full search workflow, no MCP server needed) |
+| **Tools** | `mem-search` → `mem-timeline` → `mem-get-observations`, plus explicit `mem-save` (no MCP server needed) |
+| **Read history** | Bounded supplementary file history after eligible file reads; original file output is preserved |
+| **Optional semantic context** | Relevant project memories for the current real user prompt; **off by default** |
 | **Sidebar** | `▶ Memory (online, 11.7k obs)` — click to expand recent sessions and latest observations |
 | **Background** | Every tool call, assistant message, and file edit captured as observations; sessions summarized on idle |
 
@@ -153,7 +159,7 @@ manually in that case.
 
 ### Memory Tools
 
-Three native OpenCode tools cover the same 3-step workflow as the upstream
+Three native OpenCode tools cover the same 3-step search workflow as the upstream
 Claude-Mem MCP server — no MCP server or stdio subprocess required:
 
 ```mermaid
@@ -167,6 +173,118 @@ flowchart LR
 | `mem-search` | `GET /api/search` | Formatted index with query, project, source, type, date, pagination, and ordering filters |
 | `mem-timeline` | `GET /api/timeline` | Chronological records around an `anchor` ID (or auto-located via `query`) |
 | `mem-get-observations` | `POST /api/observations/batch` | Full details for IDs — e.g. the IDs shown in the injected context |
+| `mem-save` | `POST /api/memory/save` | Explicitly save required `text`, optional `title` and `project` (defaults to current project) |
+
+`mem-save` strips `<private>` and `<claude-mem-context>` material from text/title,
+rejects empty/fully stripped content and values above 24 KiB, and reports success
+only for a valid Worker acknowledgement. It never retries automatically: after
+a timeout, check with search before retrying because the write may have succeeded.
+Manual saves do not require an observation-model inference pass, but the Worker
+still performs asynchronous vector indexing; this is **not** a promise of zero
+embedding cost. Native and namespaced `mem-save` calls are excluded from automatic
+observation capture.
+
+### Memory configuration (both runtimes)
+
+The per-turn registration, `mem-save`, file history, and semantic options described
+here require **v0.6.0 or later**. Upgrade both server and sidebar package entries;
+`0.5.0` does not include these features or the renderer fix.
+
+Configuration is read once when the server plugin is set up. Quit and restart
+OpenCode after changing options, environment, or settings; on V2 also restart the
+background service. No semantic feature is enabled globally by this plugin.
+
+**OpenCode 1** uses a tuple in `opencode.json`:
+
+```json
+{
+  "plugin": [["@ephemushroom/opencode-claude-mem", {
+    "semanticInjection": { "enabled": true, "limit": 5, "maxChars": 6000, "timeoutMs": 2000 },
+    "fileContext": { "enabled": true, "limit": 15, "maxChars": 6000, "timeoutMs": 1500 }
+  }]]
+}
+```
+
+**OpenCode 2** uses a package/options object (not a V1 tuple):
+
+```json
+{
+  "plugins": [{
+    "package": "@ephemushroom/opencode-claude-mem",
+    "options": {
+      "semanticInjection": { "enabled": true, "limit": 5, "maxChars": 6000, "timeoutMs": 2000 },
+      "fileContext": { "enabled": true, "limit": 15, "maxChars": 6000, "timeoutMs": 1500 }
+    }
+  }]
+}
+```
+
+| Option | Semantic default | File-history default | Accepted values |
+|---|---|---|---|
+| `enabled` | `false` | `true` | Boolean |
+| `limit` | `5` | `15` | Integer 1–50 |
+| `maxChars` | `6000` | `6000` | Integer 256–24000; supplementary payload only |
+| `timeoutMs` | `2000` | `1500` | Integer 100–10000 |
+
+Per-field precedence for semantic `enabled` and `limit` is **explicit plugin
+options > environment > `~/.claude-mem/settings.json` > defaults**. The environment
+and settings keys are `CLAUDE_MEM_SEMANTIC_INJECT` (`true`/`false` or `1`/`0`) and
+`CLAUDE_MEM_SEMANTIC_INJECT_LIMIT` (integer 1–50). Settings may use booleans/numbers
+or their string equivalents. Explicit `false` overrides environment `true`.
+Invalid values fall through to the next valid source; other controls use explicit
+options then defaults. Settings are read-only and never logged.
+
+Semantic retrieval uses `POST /api/context/semantic` with `{q, project, limit}`
+and reads JSON `{context, count}`. `q` is the sanitized real current prompt,
+at least 20 characters; media-only, fully private, and identifiable internal
+messages are excluded. No `platformSource` filter is sent, so Claude Code and
+OpenCode memories remain shared. Each real prompt identity gets at most one
+retrieval attempt, including failure/timeout, reused across tool-loop dispatches.
+The system block is replaced rather than accumulated. Old Workers, malformed
+responses and offline retrieval fail open.
+
+File history uses `GET /api/observations/by-file` with repeated `path` parameters
+(absolute and project-relative, normalized to forward slashes), `projects` and `limit`. Supported read arguments
+include V1 `filePath`, V2 `path`, and `file_path`/`filePaths`/`file_paths` aliases.
+Only existing regular files of at least 1500 bytes qualify, at most 10 paths per
+read. Lookups run concurrently within one configured per-read deadline (including
+file metadata lookup), not ten serial timeout periods. Rows are deduplicated by
+memory session and the displayed text is bounded; a file whose mtime is at least
+the newest observation timestamp gets no history. Delivered history is deduplicated per
+session/file revision (mtime and size); failures and timeouts may retry on a later read.
+Editing the file or starting a new session also permits another lookup. Supplementary history is explicitly
+labeled and wrapped in memory tags, appended without replacing/truncating the
+original read result, and never included in the automatic tool observation.
+Known child sessions (`parentID` when supplied by the host) skip file-history
+enrichment; V1 resumed sessions without that metadata cannot reliably be identified
+as subagents and are not guessed from the agent's name.
+
+### Prompt lifecycle and Worker limitations
+
+V1 registers stable `chat.message` IDs; V2 records admission IDs without writing,
+then registers only IDs present in delivered `session.context` records at model
+dispatch. Thus queued V2 prompts do not advance the Worker's current prompt.
+Resumed sessions without local admission history use the latest delivered real
+user turn, not a synthetic `SESSION_START`, and tool callbacks do not reread the
+whole history. Registrations are serialized per session and successful IDs are
+deduplicated locally; a failed registration retains its real prompt for retry.
+Media-only turns use `[media prompt]`. Fully private or identifiable synthetic
+turns suppress automatic observations, summaries and semantic retrieval locally,
+including when the Worker reports a skipped/private registration.
+
+**Upstream v13.24.1 still deduplicates identical prompt text within its own time
+window and has no consumed external prompt-ID contract.** This plugin submits
+distinct IDs even if their text is identical, without prefixing/changing the text,
+but cannot guarantee distinct database prompt rows. A `duplicate` acknowledgement
+is accepted; other skipped registrations do not authorize automatic capture.
+V1 exposes submission callbacks rather than V2's delivered/inbox distinction;
+it cannot provide the same queued-consumption guarantee. A restart cannot restore
+the plugin's in-memory ID dedupe ledger, so upstream dedupe remains relevant.
+
+Base context is session-isolated, limited to 24000 characters, with a two-second
+request timeout. It is refreshed at V1 compaction start/end and V2 compaction
+requests/completed events or changed compaction records. Failed reads are retryable;
+an invalidated or deleted session cannot be repopulated by an older in-flight read.
 
 ## How It Works
 
@@ -179,7 +297,7 @@ sequenceDiagram
     OC->>P: plugin loads
     P->>P: self-heal tui.json / cli.json
     P->>W: health check (auto-start via bunx if down)
-    OC->>P: first user prompt (chat.message / context hook)
+    OC->>P: each real user prompt (chat.message / delivered context)
     P->>W: POST /api/sessions/init
     OC->>P: system prompt transform / context hook
     W-->>P: GET /api/context/inject (cached per session)
@@ -206,8 +324,8 @@ APIs:
 | Behavior | OpenCode 1 | OpenCode 2 |
 |---|---|---|
 | Inject memory context | `experimental.chat.system.transform` | `ctx.session.hook('context')` |
-| Preserve memory on compaction | `experimental.session.compacting` | _(context hook re-runs per dispatch)_ |
-| Session init with user prompt | `chat.message` | `ctx.session.hook('context')` (from `event.messages`) |
+| Refresh memory on compaction | `experimental.session.compacting` + `session.compacted` | compaction model requests/events + delivered compaction records |
+| Register each real user prompt | `chat.message` (message ID) | `ctx.session.hook('context')` (`ctx.session.context` delivered IDs; not inbox admission) |
 | Capture tool observations | `tool.execute.after` | `ctx.tool.hook('execute.after')` |
 | Custom memory tools | `tool` (`mem-search`, …) | `ctx.tool.transform` (`tools.add`) |
 | Assistant text capture | `event` (`message.updated`, debounced 250ms) | `session.text.ended` event (complete text) |
@@ -355,6 +473,9 @@ for the per-runtime API):
 | `GET` | `/api/search?query=...&project=...&dateStart=...&dateEnd=...` | `mem-search`; also supports `limit`, `platformSource`, `type`, `obs_type`, `offset`, and `orderBy` |
 | `GET` | `/api/timeline?project={name}&anchor={id}` | `mem-timeline` |
 | `POST` | `/api/observations/batch` | `mem-get-observations` |
+| `POST` | `/api/memory/save` | Explicit `mem-save`, nested `metadata.platformSource` attribution |
+| `POST` | `/api/context/semantic` | Opt-in semantic context; JSON `{context,count}` response |
+| `GET` | `/api/observations/by-file?path=...&path=...&projects=...&limit=...` | Supplementary file history |
 | `GET` | `/api/stats` + `/api/processing-status` | Sidebar status |
 | `GET` | `/api/summaries` + `/api/observations` | Sidebar recent items (expanded only) |
 
@@ -376,9 +497,13 @@ The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
   invokes both adapters. Both installed server loaders prefer `./server`, so
   routing only the root export to V2 is insufficient. Never combine `server`
   and `tui` in one object: V1 rejects that shape.
+- **Host renderer ownership** — the built TUI bridge uses explicit `.js`
+  relative imports so the host discovers both adapter modules and routes their
+  OpenTUI/Solid imports to its own runtime. Extensionless bridge imports can bypass
+  that prescan and crash the sidebar with `No renderer found`.
 - **Zero runtime dependencies for server plugins** — the OpenCode plugin SDK
-  is bundled into `dist/` (V1 `index.js` ~480 KB, V2 `v2.js` ~30 KB via a deep
-  `@opencode-ai/plugin` import that skips effect). The TUI entrypoints keep
+  is bundled into `dist/` (V1 `index.js` ~490 KB, V2 `v2.js` ~160 KB including
+  bounded-response validation, using a deep SDK import that skips effect). The TUI entrypoints keep
   `@opentui/solid` external (provided by the host TUI).
 - **Reactive sidebar** — collapse state and view data are solid-js signals
   (shared with OpenCode's own solid instance via `--external solid-js`), so
@@ -392,8 +517,8 @@ The worker endpoint is resolved in this order: `CLAUDE_MEM_WORKER_HOST` /
   `bunx claude-mem start` once per OpenCode process (skipped if `bun` is not
   on `PATH`). Health is rechecked on subsequent hooks, so a recovered Worker
   does not require restarting OpenCode.
-- **Context caching** — memory context is fetched once per session and reused
-  across prompt injection and compaction. Failed fetches are not cached.
+- **Context caching** — base memory context is reused per session until a
+  compaction boundary invalidates it. Failed fetches are not cached.
 - **Circular memory protection** — injected context is wrapped in
   `<claude-mem-context>` tags, Claude-Mem search tools are skipped from
   observation capture, and memory tags are stripped before storage.
@@ -472,7 +597,8 @@ bun run lint        # oxlint
 bun run fmt:check   # oxfmt
 bun src/test-fixtures/v2-runtime.ts    # installed V2: packed bare package, local model + Worker
 bun src/test-fixtures/v2-runtime.ts v1 # installed V1: same package and behavior assertions
-bun src/test-fixtures/tui-runtime.ts  # installed V2 TUI: bare CLI entry loads the sidebar
+bun src/test-fixtures/tui-runtime.ts  # installed V2: real PTY session, render and mouse toggle
+bun src/test-fixtures/tui-runtime.ts offline # offline sidebar still renders and toggles
 bun --conditions=browser src/test-fixtures/cli-driver.ts render # real rendering + mouse click
 ```
 
@@ -483,11 +609,16 @@ The runtime QA drivers never write to your real config or memory database and
 never use paid models. They pack the current build, serve it through a temporary
 local registry, and ask the installed host to resolve the bare npm name in an
 isolated home/cache. Registry access is needed for package dependencies. Server
-QA drives injection, exactly-once tool capture, all three memory tools, and
-summarization. The V2 TUI probe proves sidebar setup through Worker polling and
-unchanged bare CLI config, not whole-window visual layout (its terminal is piped).
-The separate OpenTUI driver exercises actual bridge rendering and clicks. V1's
-interactive host is not verified through pipes; its server runtime is verified.
+QA drives base/opt-in semantic injection, exactly-once tool capture, all four memory tools,
+private-save rejection, file-history enrichment without capture pollution, and
+summarization. HTTP regression fixtures also cover repeated/distinct IDs, queued
+V2 admission versus consumption, private turns, retries and compaction invalidation.
+The V2 TUI probe uses ConPTY and xterm terminal cells to open a real session and
+capture collapsed, expanded, and re-collapsed states with actual mouse events.
+It checks online/offline operation, unchanged CLI config, and zero model requests.
+Set `MEM_TUI_EVIDENCE_DIR` to retain text and truecolor ANSI captures. The separate
+OpenTUI driver covers component behavior. V1's interactive host remains outside
+this check; its server runtime is verified. Browser PNG fidelity is not claimed.
 
 ## License
 
