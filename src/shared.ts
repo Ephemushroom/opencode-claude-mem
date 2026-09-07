@@ -14,31 +14,28 @@ export const META_TOOLS = new Set([
   'todowrite',
 ])
 
-const PRIVATE_TAG_REGEX = /<private>[\s\S]*?<\/private>/g
-const CONTEXT_TAG_REGEX = /<claude-mem-context>[\s\S]*?<\/claude-mem-context>/g
-
 export function stripTaggedContent(text: string): string {
-  if (!text) {
-    return text
+  let result = ''
+  let offset = 0
+  const stack: string[] = []
+  for (const match of text.matchAll(/<(\/?)(private|claude-mem-context)\b[^>]*>/gi)) {
+    if (stack.length === 0) {
+      result += text.slice(offset, match.index)
+    }
+    const name = match[2].toLowerCase()
+    if (match[1] === '/') {
+      if (stack.at(-1) === name) {
+        stack.pop()
+      }
+    } else {
+      stack.push(name)
+    }
+    offset = match.index + match[0].length
   }
-
-  let result = text
-  let replacements = 0
-
-  while (replacements < MAX_TAG_REPLACEMENTS && PRIVATE_TAG_REGEX.test(result)) {
-    PRIVATE_TAG_REGEX.lastIndex = 0
-    result = result.replace(PRIVATE_TAG_REGEX, '')
-    replacements++
+  // An unmatched opening tag protects the rest of the payload, not just a pair.
+  if (stack.length === 0) {
+    result += text.slice(offset)
   }
-  PRIVATE_TAG_REGEX.lastIndex = 0
-
-  while (replacements < MAX_TAG_REPLACEMENTS && CONTEXT_TAG_REGEX.test(result)) {
-    CONTEXT_TAG_REGEX.lastIndex = 0
-    result = result.replace(CONTEXT_TAG_REGEX, '')
-    replacements++
-  }
-  CONTEXT_TAG_REGEX.lastIndex = 0
-
   return result.trim()
 }
 
@@ -96,7 +93,7 @@ export function shouldSkipObservationTool(toolName: string): boolean {
   // server name (prefix varies: `claude-mem_mcp-search_`, `mem_...`, etc.)
   if (
     normalizedName.includes('mcp-search') ||
-    /(?:^|[-.])mem-(?:search|timeline|get-observations)$/.test(normalizedName)
+    /(?:^|[-.])mem-(?:save|search|timeline|get-observations)$/.test(normalizedName)
   ) {
     return true
   }

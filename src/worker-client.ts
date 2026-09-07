@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { stripTaggedContent } from './shared'
 
 const HEALTH_TIMEOUT_MS = 1000
 const WRITE_TIMEOUT_MS = 10000
@@ -133,7 +134,7 @@ function readSettingsRaw(): string | null {
   }
 }
 
-function getWorkerBaseUrl(): string {
+export function getWorkerBaseUrl(): string {
   const endpoint = parseWorkerEndpoint(process.env, readSettingsRaw())
   return `http://${endpoint.host}:${endpoint.port}`
 }
@@ -307,7 +308,12 @@ export class WorkerClient {
     contentSessionId: string,
     project: string,
     prompt: string
-  ): Promise<{ sessionDbId: number; promptNumber: number } | null> {
+  ): Promise<{
+    sessionDbId: number
+    promptNumber: number
+    skipped?: boolean
+    reason?: string
+  } | null> {
     try {
       const response = await fetch(`${this.BASE_URL}/api/sessions/init`, {
         method: 'POST',
@@ -323,7 +329,22 @@ export class WorkerClient {
       if (!response.ok) {
         return null
       }
-      return (await response.json()) as { sessionDbId: number; promptNumber: number }
+      const value: unknown = await response.json()
+      if (
+        !isRecord(value) ||
+        typeof value.sessionDbId !== 'number' ||
+        typeof value.promptNumber !== 'number' ||
+        !Number.isFinite(value.sessionDbId) ||
+        !Number.isFinite(value.promptNumber)
+      ) {
+        return null
+      }
+      return {
+        sessionDbId: value.sessionDbId,
+        promptNumber: value.promptNumber,
+        skipped: value.skipped === true,
+        reason: typeof value.reason === 'string' ? value.reason : undefined,
+      }
     } catch {
       return null
     }
@@ -377,8 +398,8 @@ export class WorkerClient {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contentSessionId,
-          last_user_message: lastUserMessage,
-          last_assistant_message: lastAssistantMessage,
+          last_user_message: stripTaggedContent(lastUserMessage),
+          last_assistant_message: stripTaggedContent(lastAssistantMessage),
           platformSource: PLATFORM_SOURCE,
           observedModel: metadata.observedModel,
           observedBilling: metadata.observedBilling,
@@ -397,7 +418,8 @@ export class WorkerClient {
   static async getContext(project: string): Promise<string | null> {
     try {
       const response = await fetch(
-        `${this.BASE_URL}/api/context/inject?project=${encodeURIComponent(project)}`
+        `${this.BASE_URL}/api/context/inject?project=${encodeURIComponent(project)}`,
+        { signal: AbortSignal.timeout(2000) }
       )
       if (!response.ok) {
         return null
