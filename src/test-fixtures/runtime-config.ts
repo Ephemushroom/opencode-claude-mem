@@ -1,4 +1,12 @@
-export function runtimeConfig(version: 'v1' | 'v2', plugins: readonly string[], origin: string) {
+export function runtimeConfig(
+  version: 'v1' | 'v2',
+  plugins: readonly (
+    | string
+    | readonly [string, unknown]
+    | { readonly package: string; readonly options: unknown }
+  )[],
+  origin: string
+) {
   const model = { name: 'Fixture model', limit: { context: 32000, output: 512 } }
   const runtimes = {
     v1: {

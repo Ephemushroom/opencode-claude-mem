@@ -1,5 +1,6 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
+import { assertRuntime } from './runtime-assertions'
 import { join } from 'node:path'
 import { runtimeConfig } from './runtime-config'
 import { serveRuntimePackage } from './runtime-package'
@@ -14,8 +15,15 @@ const config = join(root, 'config', 'opencode')
 const work = join(root, 'runtime-project')
 await mkdir(config, { recursive: true })
 await mkdir(work)
+const readPath = join(work, 'history.txt')
+const originalFile = 'runtime-file-bytes-'.repeat(100)
+await writeFile(readPath, originalFile)
+await utimes(readPath, 100, 100)
 let mainRequests = 0
 let injected = false
+let semanticInjected = false
+let historyInjected = false
+let filePreserved = false
 const writes: { path: string; body: Record<string, unknown> }[] = []
 const reads: string[] = []
 const toolCatalogs: string[][] = []
@@ -38,15 +46,31 @@ const server = Bun.serve({
       if (primary) {
         mainRequests++
         injected ||= JSON.stringify(body.messages).includes('fixture-runtime-memory')
+        semanticInjected ||= JSON.stringify(body.messages).includes('fixture-semantic-memory')
+        historyInjected ||= JSON.stringify(body.messages).includes('fixture-file-history')
+        filePreserved ||= JSON.stringify(body.messages).includes(originalFile)
       }
       const toolName = primary
-        ? ['qa_echo', 'mem-search', 'mem-timeline', 'mem-get-observations'].at(mainRequests - 1)
+        ? [
+            'qa_echo',
+            'mem-search',
+            'mem-timeline',
+            'mem-get-observations',
+            'mem-save',
+            'read',
+            'mem-save',
+          ].at(mainRequests - 1)
         : undefined
       const toolInputs: Record<string, string> = {
         qa_echo: '{}',
         'mem-search': '{"query":"fixture"}',
         'mem-timeline': '{"anchor":1}',
         'mem-get-observations': '{"ids":[1]}',
+        'mem-save':
+          mainRequests === 7
+            ? '{"text":"<private>fixture-private-memory</private>"}'
+            : '{"text":"fixture-manual-memory"}',
+        read: JSON.stringify(version === 'v1' ? { filePath: readPath } : { path: readPath }),
       }
       const message = toolName
         ? {
@@ -107,10 +131,38 @@ const server = Bun.serve({
       if (url.pathname === '/api/observations/batch') {
         return Response.json([{ id: 1, title: 'fixture-observation' }])
       }
+      if (url.pathname === '/api/memory/save') {
+        return Response.json({
+          success: true,
+          id: 2,
+          title: 'fixture-manual-memory',
+          project: 'runtime-project',
+          message: 'saved',
+        })
+      }
+      if (url.pathname === '/api/context/semantic') {
+        return Response.json({ context: 'fixture-semantic-memory', count: 1 })
+      }
       return Response.json({ sessionDbId: 1, promptNumber: 1 })
     }
     if (url.pathname === '/api/context/inject') {
       return new Response('fixture-runtime-memory')
+    }
+    if (url.pathname === '/api/observations/by-file') {
+      return Response.json({
+        count: 1,
+        observations: [
+          {
+            id: 3,
+            title: 'fixture-file-history',
+            type: 'discovery',
+            created_at_epoch: 200000,
+            memory_session_id: 'fixture',
+            files_read: '[]',
+            files_modified: '[]',
+          },
+        ],
+      })
     }
     return Response.json({
       status: 'ok',
@@ -120,7 +172,9 @@ const server = Bun.serve({
 })
 try {
   const helper = join(root, 'qa-helper')
-  const runtime = runtimeConfig(version, [pkg.name, helper], server.url.origin)
+  const options = { semanticInjection: { enabled: true } }
+  const entry = version === 'v1' ? ([pkg.name, options] as const) : { package: pkg.name, options }
+  const runtime = runtimeConfig(version, [entry, helper], server.url.origin)
   await mkdir(helper)
   const manifest = JSON.stringify({
     type: 'module',
@@ -168,39 +222,20 @@ try {
   } finally {
     clearTimeout(timeout)
   }
-  assert.equal(code, 0, `CLI exit ${code}: ${stderr.slice(-4000)} ${stdout.slice(-4000)}`)
-  assert.ok(
+  assertRuntime({
+    code,
+    stdout,
+    stderr,
+    mainRequests,
     injected,
-    `No memory injection observed; model requests=${mainRequests}; ${JSON.stringify({ toolCatalogs, reads, writes: writes.map((item) => item.path) })}; ${stderr
-      .split('\n')
-      .filter((line) => /plugin|error|warn/i.test(line))
-      .join('\n')
-      .slice(-8000)} ${stdout.slice(-2000)}`
-  )
-  assert.ok(
-    reads.includes('/api/search'),
-    `native memory search must execute: ${JSON.stringify({ mainRequests, toolCatalogs, reads, writes })} ${stdout.slice(-3000)}`
-  )
-  assert.ok(
-    reads.includes('/api/timeline') && reads.includes('/api/observations/batch'),
-    'native three-step search must complete'
-  )
-  assert.equal(
-    writes.filter(
-      (item) =>
-        item.path === '/api/sessions/observations' && item.body['tool_use_id'] === 'qa-call-1'
-    ).length,
-    1,
-    'actual tool call ID must reach Worker'
-  )
-  assert.ok(
-    writes.some(
-      (item) => item.path === '/api/sessions/summarize' && item.body['observedModel'] === 'model'
-    ),
-    'actual observed model must reach summary'
-  )
-  assert.ok(!writes.some((item) => item.path === '/api/sessions/complete'))
-  assert.equal(pkg.downloads, 1, 'the host must install the actual packed bare package')
+    semanticInjected,
+    historyInjected,
+    filePreserved,
+    reads,
+    writes,
+    toolCatalogs,
+    downloads: pkg.downloads,
+  })
   process.stdout.write(
     JSON.stringify({
       passed: true,
@@ -209,6 +244,9 @@ try {
       downloads: pkg.downloads,
       mainRequests,
       injected,
+      semanticInjected,
+      historyInjected,
+      filePreserved,
       search: true,
       observations: writes.filter((item) => item.path.endsWith('/observations')).length,
       summaries: writes.filter((item) => item.path.endsWith('/summarize')).length,
