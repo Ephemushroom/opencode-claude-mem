@@ -1,7 +1,6 @@
-import type { SlotClaim, Storage } from '@opencode-ai/plugin-v2/tui/context'
+import type { Context, SlotClaim, Storage } from '@opencode/plugin/tui/context'
 import { createComponent, createElement, insert, testRender } from '@opentui/solid'
 import { createStore, produce } from 'solid-js/store'
-import type { Context } from '@opencode-ai/plugin-v2/tui/plugin'
 import { RGBA } from '@opentui/core'
 import assert from 'node:assert/strict'
 import { createSignal } from 'solid-js'
@@ -119,20 +118,20 @@ const context = hostStub<Context>({
   // Host-provided resolved tokens; importing the legacy theme runtime would load a second core.
   theme: hostStub<Context['theme']>({
     text: hostStub<Context['theme']['text']>({
-      default: RGBA.fromHex('#eeeeee'),
-      subdued: RGBA.fromHex('#888888'),
+      base: RGBA.fromHex('#eeeeee'),
+      muted: RGBA.fromHex('#888888'),
       action: hostStub<Context['theme']['text']['action']>({
         primary: hostStub<Context['theme']['text']['action']['primary']>({
-          default: RGBA.fromHex('#66aaff'),
+          base: RGBA.fromHex('#66aaff'),
         }),
       }),
       feedback: hostStub<Context['theme']['text']['feedback']>({
-        success: { default: RGBA.fromHex('#66cc88'), subdued: RGBA.fromHex('#66cc88') },
-        warning: { default: RGBA.fromHex('#ddbb66'), subdued: RGBA.fromHex('#ddbb66') },
-        error: { default: RGBA.fromHex('#ee6666'), subdued: RGBA.fromHex('#ee6666') },
+        success: { base: RGBA.fromHex('#66cc88'), muted: RGBA.fromHex('#66cc88') },
+        warning: { base: RGBA.fromHex('#ddbb66'), muted: RGBA.fromHex('#ddbb66') },
+        error: { base: RGBA.fromHex('#ee6666'), muted: RGBA.fromHex('#ee6666') },
       }),
     }),
-    border: { default: RGBA.fromHex('#444444') },
+    border: { base: RGBA.fromHex('#444444') },
   }),
   storage: hostStub<Context['storage']>({ memory }),
   data: hostStub<Context['data']>({

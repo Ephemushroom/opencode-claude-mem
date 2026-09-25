@@ -1,4 +1,3 @@
-import type * as Solid from '@opentui/solid'
 import {
   type MemSidebarView,
   POLL_INTERVAL_MS,
@@ -8,9 +7,9 @@ import {
   readMemView,
   viewKey,
 } from './sidebar-model'
-import type { JSX } from '@opentui/solid'
-import type { ResolvedTheme } from '@opencode-ai/theme/tui'
-import { define } from '@opencode-ai/plugin-v2/tui/plugin'
+import type { JSX, createElement, insert, setProp } from '@opentui/solid'
+import { Plugin } from '@opencode/plugin/tui'
+import type { ResolvedTheme } from '@opencode/theme/tui'
 
 const REFRESH_EVENTS = ['session.created', 'session.execution.succeeded'] as const
 
@@ -48,7 +47,7 @@ function emptyView(project: string): MemSidebarView {
  * V1 sidebar, but registered through a `sidebar.content` slot claim with
  * reactive state from `ctx.storage.memory` (survives hot reloads).
  */
-export default define({
+export default Plugin.define({
   id: 'claude-mem.tui',
   setup: async (ctx) => {
     const solid = await import('@opentui/solid').catch(() => null)
@@ -180,17 +179,21 @@ export default define({
 function themeFromResolved(resolved: ResolvedTheme): Theme {
   const { text } = resolved
   return {
-    text: text.default,
-    textMuted: text.subdued,
-    info: text.action.primary.default,
-    success: text.feedback.success.default,
-    warning: text.feedback.warning.default,
-    error: text.feedback.error.default,
-    borderSubtle: resolved.border.default,
+    text: text.base,
+    textMuted: text.muted,
+    info: text.action.primary.base,
+    success: text.feedback.success.base,
+    warning: text.feedback.warning.base,
+    error: text.feedback.error.base,
+    borderSubtle: resolved.border.base,
   }
 }
 
-type SolidRuntime = Pick<typeof Solid, 'createElement' | 'setProp' | 'insert'>
+interface SolidRuntime {
+  createElement: typeof createElement
+  setProp: typeof setProp
+  insert: typeof insert
+}
 
 function materializeNode(node: ViewNode, solid: SolidRuntime): JSX.Element {
   const element = solid.createElement(node.kind)

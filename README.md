@@ -6,7 +6,8 @@ Persistent memory for [OpenCode](https://opencode.ai), powered by
 **Supports OpenCode 1 and OpenCode 2 with the same package name from v0.5.0.**
 No `/v2` or `/cli` suffix is required. Existing version-specific entries remain compatible.
 
-**v0.6.0** adds per-turn memory tracking, `mem-save`, file history and opt-in semantic
+**v0.6.1** updates the OpenCode 2 TUI adapter for the `@opencode/plugin` 2.0.16
+plugin contract. **v0.6.0** adds per-turn memory tracking, `mem-save`, file history and opt-in semantic
 injection, and fixes the OpenCode 2 sidebar's `No renderer found` crash.
 
 Share the same Claude-Mem worker, database, and memory across your coding

@@ -1,6 +1,6 @@
 {
   "name": "@ephemushroom/opencode-claude-mem",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "OpenCode plugin for Claude-Mem persistent memory system",
   "main": "./dist/package-server.js",
   "types": "./dist/package-server.d.ts",
@@ -61,13 +61,15 @@
     "access": "public"
   },
   "dependencies": {
-    "@opentui/solid": "0.5.1"
+    "@opentui/solid": "0.5.10"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.14.41",
     "@opencode-ai/plugin-v2": "npm:@opencode-ai/plugin@0.0.0-beta-19151",
     "@opencode-ai/theme": "^0.0.0-next-17030",
-    "@opentui/core": "0.5.1",
+    "@opencode/plugin": "2.0.16",
+    "@opencode/theme": "2.0.16",
+    "@opentui/core": "0.5.10",
     "@types/bun": "latest",
     "oxfmt": "^0.33.0",
     "oxlint": "^1.63.0",
