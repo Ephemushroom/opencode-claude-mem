@@ -1,6 +1,6 @@
 {
   "name": "@ephemushroom/opencode-claude-mem",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "OpenCode plugin for Claude-Mem persistent memory system",
   "main": "./dist/package-server.js",
   "types": "./dist/package-server.d.ts",

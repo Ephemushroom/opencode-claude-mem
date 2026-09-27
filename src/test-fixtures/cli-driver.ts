@@ -1,7 +1,7 @@
 import type { Context, SlotClaim, Storage } from '@opencode/plugin/tui/context'
+import { RGBA, TextAttributes } from '@opentui/core'
 import { createComponent, createElement, insert, testRender } from '@opentui/solid'
 import { createStore, produce } from 'solid-js/store'
-import { RGBA } from '@opentui/core'
 import assert from 'node:assert/strict'
 import { createSignal } from 'solid-js'
 
@@ -95,6 +95,14 @@ async function waitForFrame(predicate: (frame: string) => boolean): Promise<void
       // eslint-disable-next-line no-await-in-loop
       await ui.renderOnce()
       if (predicate(ui.captureCharFrame())) {
+        const spans = ui.captureSpans().lines.flatMap((line) => line.spans)
+        const title = spans.find((span) => span.text.includes('Memory'))
+        assert.ok(title, 'sidebar title must be rendered')
+        assert.equal(
+          title.attributes & TextAttributes.BOLD,
+          TextAttributes.BOLD,
+          'sidebar title must stay bold across collapse states'
+        )
         return
       }
       // eslint-disable-next-line no-await-in-loop

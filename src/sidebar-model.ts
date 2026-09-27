@@ -145,7 +145,8 @@ export function buildMemNodes(
   const summary = summaryLine(view)
   const header = box({ flexDirection: 'row', gap: 1, onMouseDown: onToggle }, [
     text({ fg: theme.text }, collapsed ? '▶' : '▼'),
-    text({ fg: theme.info }, 'Memory'),
+    // TextAttributes.BOLD; keep this shared model independent of the native TUI runtime.
+    text({ fg: theme.info, attributes: 1 }, 'Memory'),
     ...(collapsed ? [text({ fg: toneColor(summary.tone, theme) }, summary.label)] : []),
   ])
 

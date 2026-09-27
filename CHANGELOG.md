@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-27
+
+### Fixed
+
+- Render the Memory sidebar title in bold in both collapsed and expanded states.
+- Verify the rendered title's bold attribute across sidebar state changes.
+
 ## [0.6.0] - 2026-09-07
 
 ### Added
