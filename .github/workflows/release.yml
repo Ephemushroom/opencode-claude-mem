@@ -37,12 +37,12 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Test adapters and package exports
+      - name: Test sidebar and package exports
         run: bun test
 
       - name: Verify dist output
         run: |
-          for entry in index v2 tui cli package-server package-tui; do
+          for entry in tui cli package-tui; do
             test -f "dist/$entry.js"
             test -f "dist/$entry.d.ts"
           done

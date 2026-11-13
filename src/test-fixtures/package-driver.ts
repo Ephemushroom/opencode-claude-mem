@@ -21,20 +21,15 @@ process.env.CLAUDE_MEM_WORKER_PORT = String(worker.port)
 try {
   const load = (entry: string) =>
     import(pathToFileURL(resolve(import.meta.dir, '../..', entry)).href)
-  const [server, sidebar, v1, v2, tui, cli] = await Promise.all([
-    load(manifest.exports['.'].import),
+  const [sidebar, tui, cli] = await Promise.all([
     load(manifest.exports['./tui'].import),
-    load('./dist/index.js'),
-    load('./dist/v2.js'),
     load('./dist/tui.js'),
     load('./dist/cli.js'),
   ])
-  assert.equal(server.default.server, v1.default.server)
-  assert.equal(server.default.setup, v2.default.setup)
   assert.equal(sidebar.default.tui, tui.default.tui)
   assert.equal(sidebar.default.setup, cli.default.setup)
-  assert.equal(requests, 0, 'importing either bridge must not contact the Worker')
-  assert.deepEqual(await readdir(config), [], 'importing must not run config self-heal')
+  assert.equal(requests, 0, 'importing the bridge must not contact the Worker')
+  assert.deepEqual(await readdir(config), [], 'importing must not write configuration')
   process.stdout.write('PASS package-import')
 } finally {
   await worker.stop(true)

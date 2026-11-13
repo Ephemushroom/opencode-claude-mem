@@ -1,9 +1,11 @@
 import {
   type MemSidebarView,
   POLL_INTERVAL_MS,
+  type RecentItemHandler,
   type Theme,
   type ViewNode,
   buildMemNodes,
+  readDetail,
   readMemView,
   viewKey,
 } from './sidebar-model'
@@ -22,11 +24,14 @@ function emptyView(project: string): MemSidebarView {
   return {
     healthy: false,
     project,
+    scope: 'all',
+    totalObservations: null,
     observations: null,
     sessions: null,
     summaries: null,
     queueDepth: null,
     isProcessing: false,
+    asOf: 0,
     recentSummaries: [],
     recentObservations: [],
   }
@@ -113,11 +118,46 @@ export default Plugin.define({
       void refresh().catch(() => {})
     }
 
+    let opening = false
+    const onSelect: RecentItemHandler = (kind, id) => {
+      if (disposed || opening) {
+        return
+      }
+      opening = true
+      void readDetail(kind, id)
+        .then((detail) => {
+          if (disposed) {
+            return
+          }
+          if (!detail) {
+            ctx.ui.toast.show({
+              title: 'Claude-Mem',
+              message: `Could not load ${kind} #${id} from the Worker`,
+              variant: 'warning',
+              duration: 3000,
+            })
+            return
+          }
+          return ctx.ui.dialog.alert(detail)
+        })
+        .catch(() => {})
+        .finally(() => {
+          opening = false
+        })
+    }
+
     const disposeSlot = ctx.ui.slot({
       append: 'sidebar.content',
       render: () =>
         materialize(
-          () => buildMemNodes(state.view, themeFromResolved(ctx.theme), state.collapsed, onToggle),
+          () =>
+            buildMemNodes(
+              state.view,
+              themeFromResolved(ctx.theme),
+              state.collapsed,
+              onToggle,
+              onSelect
+            ),
           solid
         ),
     })

@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { Database } from 'bun:sqlite'
 import assert from 'node:assert/strict'
 import { driveSidebar } from './tui-screen'
 import { join } from 'node:path'
@@ -15,6 +16,19 @@ const work = join(root, 'project')
 await mkdir(config, { recursive: true })
 await mkdir(work)
 await mkdir(evidence, { recursive: true })
+// Isolated Worker database: 7 rows for this project, while /api/stats reports 12 globally.
+await mkdir(join(root, '.claude-mem'))
+const db = new Database(join(root, '.claude-mem', 'claude-mem.db'))
+db.run('CREATE TABLE observations (project TEXT, merged_into_project TEXT)')
+db.run('CREATE TABLE session_summaries (project TEXT, merged_into_project TEXT)')
+db.run('CREATE TABLE sdk_sessions (project TEXT)')
+for (let i = 0; i < 7; i++) {
+  db.run("INSERT INTO observations VALUES ('project', NULL)")
+}
+db.run("INSERT INTO observations VALUES ('elsewhere', NULL)")
+db.run("INSERT INTO session_summaries VALUES ('project', NULL)")
+db.run("INSERT INTO sdk_sessions VALUES ('project')")
+db.close()
 const pkg = await serveRuntimePackage(root)
 const ready = Promise.withResolvers<void>()
 let stats = 0
@@ -37,12 +51,26 @@ const worker = Bun.serve({
         { status: offline ? 503 : 200 }
       )
     }
+    const at = Date.now() - 12 * 60_000
     if (path === '/api/summaries') {
-      return Response.json({ items: [{ id: 1, request: 'Recent session fixture' }] })
+      return Response.json({
+        items: [{ id: 1, request: 'project: Recent session fixture', created_at_epoch: at }],
+      })
     }
     if (path === '/api/observations') {
       return Response.json({
-        items: [{ id: 2, type: 'feature', title: 'Latest observation fixture' }],
+        items: [
+          { id: 2, type: 'feature', title: 'Latest observation fixture', created_at_epoch: at },
+        ],
+      })
+    }
+    if (path === '/api/observation/2') {
+      return Response.json({
+        id: 2,
+        type: 'feature',
+        title: 'Latest observation fixture',
+        facts: '["Detail dialog fixture fact"]',
+        created_at_epoch: at,
       })
     }
     if (path === '/api/context/inject') {
@@ -75,7 +103,8 @@ const stop = async () => {
   }
 }
 try {
-  const runtime = runtimeConfig('v2', [pkg.name], worker.url.origin)
+  // Sidebar-only package: the server config loads no plugin; cli.json loads the sidebar.
+  const runtime = runtimeConfig('v2', [], worker.url.origin)
   await writeFile(join(config, 'opencode.json'), JSON.stringify(runtime.config))
   const sidebarPath = join(config, 'cli.json')
   const navigator = join(root, 'open-session.js')
@@ -111,6 +140,12 @@ try {
     stderr: 'pipe',
   })
   assert.equal(await install.exited, 0, await new Response(install.stderr).text())
+  // Bun extracts node-pty's prebuilt spawn-helper without its execute bit on macOS/Linux.
+  const helpers = new Bun.Glob('node_modules/node-pty/prebuilds/*/spawn-helper')
+  for (const path of helpers.scanSync({ cwd: root, absolute: true })) {
+    // oxlint-disable-next-line no-await-in-loop
+    await chmod(path, 0o755)
+  }
   const helperPack = Bun.spawn(
     [
       process.execPath,

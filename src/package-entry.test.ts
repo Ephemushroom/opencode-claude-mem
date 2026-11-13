@@ -3,33 +3,20 @@ import manifest from '../package.json'
 import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 
-test('imports adapters without invoking setup when either bridge is loaded', async () => {
+test('imports sidebar adapters without contacting the Worker', async () => {
   // Given a fresh process and isolated Worker/config boundary.
   const child = Bun.spawn([process.execPath, 'src/test-fixtures/package-driver.ts'], {
     stdout: 'pipe',
     stderr: 'pipe',
   })
-  // When both built bridges and legacy adapter modules are imported.
+  // When the built bridge and both adapter modules are imported.
   const [stdout, stderr, code] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
   ])
-  // Then the bridges retain adapter identity without Worker requests or self-heal writes.
+  // Then the bridge retains adapter identity without Worker requests or config writes.
   expect({ code, stderr }, stdout).toEqual({ code: 0, stderr: '' })
-})
-
-test.each(['.', './server'] as const)('exposes both server contracts through %s', async (key) => {
-  // Given the package export selected by a standard ESM loader.
-  const entry = pathToFileURL(resolve(import.meta.dir, '..', manifest.exports[key].import)).href
-  // When the published entry is imported (without invoking either adapter).
-  const { default: plugin, ClaudeMemPlugin } = await import(entry)
-  // Then each host can select its own contract; no TUI factory is on the server module.
-  expect(plugin.id).toBe('claude-mem')
-  expect(typeof plugin.server).toBe('function')
-  expect(ClaudeMemPlugin).toBe(plugin.server)
-  expect(typeof plugin.setup).toBe('function')
-  expect(plugin.tui).toBeUndefined()
 })
 
 test('exposes both sidebar contracts when the host selects the tui export', async () => {
@@ -43,12 +30,10 @@ test('exposes both sidebar contracts when the host selects the tui export', asyn
   expect(plugin.server).toBeUndefined()
 })
 
-test('preserves explicit adapter exports when consumers use legacy paths', () => {
-  // Given the shipped manifest; when legacy aliases are resolved.
-  const aliases = ['./v2', './cli'] as const
-  // Then they still select their original, single-runtime adapters.
-  expect(aliases.map((alias) => manifest.exports[alias].import)).toEqual([
-    './dist/v2.js',
-    './dist/cli.js',
-  ])
+test('ships no server part, so it cannot compete with the official claude-mem plugin', () => {
+  // Given the shipped manifest; when its exports are listed.
+  const exports = Object.keys(manifest.exports)
+  // Then only the sidebar bridge and its legacy V2 alias remain.
+  expect(exports).toEqual(['./tui', './cli'])
+  expect(manifest.exports['./cli'].import).toBe('./dist/cli.js')
 })

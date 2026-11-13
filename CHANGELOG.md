@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-13
+
+### Changed
+
+- **Sidebar only.** Memory capture, context injection, search and MCP move to the official
+  claude-mem OpenCode plugin. The package now exports only `./tui` (and the `./cli` alias);
+  `.`, `./server` and `./v2` are removed so it cannot load beside the official `claude-mem`
+  server plugin and capture twice. See README "Migrating from v0.6.x".
+- Build against `@opencode/plugin` / `@opencode/theme` 2.2.7 and `@opentui/solid` 0.8.1,
+  replacing the pinned `@opencode-ai/plugin-v2` beta-19151 alias.
+- `WorkerClient` is read-only: stats, processing status, recent summaries and observations.
+
+### Added
+
+- Per-project counts: the collapsed summary and the first expanded row count the current
+  project, read from the Worker's database in read-only mode with the Worker's own project
+  filter; a muted `all N obs` row keeps the global total. Falls back to global totals, marked
+  `all ·`, when the database is remote or unreadable.
+- Expanded header names the project; each recent row shows its age (`12m ago`) and
+  observation id.
+- Click a recent session or observation to open its full summary or observation in a dialog.
+
+### Removed
+
+- V1/V2 server adapters, `mem-search` / `mem-timeline` / `mem-get-observations` / `mem-save`,
+  read-file history enrichment, opt-in semantic injection, Worker auto-start, and the
+  `tui.json` / `cli.json` self-heal.
+
+### Fixed
+
+- Long titles, especially wide CJK text, were cut at 40 characters without an ellipsis and
+  could overflow; the renderer now truncates by display width with `...`.
+- Titles no longer repeat the project name.
+- Real-PTY sidebar check on OpenCode 2.2.7: make node-pty's `spawn-helper` executable after
+  install, and hover before clicking because the host hit-tests from the pointer.
+
 ## [0.6.2] - 2026-09-27
 
 ### Fixed

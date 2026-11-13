@@ -37,7 +37,7 @@ export function runtimeConfig(
       },
     },
     v2: {
-      binary: 'opencode2',
+      binary: 'opencode',
       args: [
         'run',
         '--standalone',

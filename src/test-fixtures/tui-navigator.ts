@@ -1,4 +1,4 @@
-import type { Context } from '@opencode-ai/plugin-v2/tui/plugin'
+import type { Context } from '@opencode/plugin/tui/context'
 
 export default {
   id: 'fixture-session',
@@ -12,7 +12,7 @@ export default {
     // Navigate after the initial host route has mounted, not during plugin setup.
     let count = 0
     const timer = setInterval(async () => {
-      await ctx.client.session.rename({
+      await ctx.client.session.update({
         sessionID: session.id,
         title: `Sidebar fixture ${++count}`,
       })

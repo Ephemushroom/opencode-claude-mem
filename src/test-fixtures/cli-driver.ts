@@ -4,6 +4,8 @@ import { createComponent, createElement, insert, testRender } from '@opentui/sol
 import { createStore, produce } from 'solid-js/store'
 import assert from 'node:assert/strict'
 import { createSignal } from 'solid-js'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 const scenario = process.argv[2] ?? 'render'
 const held = Promise.withResolvers<void>()
@@ -31,17 +33,23 @@ const server = Bun.serve({
     if (url.pathname === '/api/processing-status') {
       return Response.json({ queueDepth: 0, isProcessing: false })
     }
+    if (url.pathname === '/api/observation/2') {
+      return Response.json({ id: 2, type: 'feature', title: 'Latest observation fixture' })
+    }
     recentProjects.push(url.searchParams.get('project') ?? '')
+    const at = Date.now() - 12 * 60_000
     return Response.json({
       items:
         url.pathname === '/api/summaries'
-          ? [{ id: 1, request: 'Recent session fixture' }]
-          : [{ id: 2, type: 'feature', title: 'Latest observation fixture' }],
+          ? [{ id: 1, request: 'cli-fixture: Recent session fixture', created_at_epoch: at }]
+          : [{ id: 2, type: 'feature', title: 'Latest observation fixture', created_at_epoch: at }],
     })
   },
 })
 process.env.CLAUDE_MEM_WORKER_HOST = '127.0.0.1'
 process.env.CLAUDE_MEM_WORKER_PORT = String(server.port)
+// No fixture database: project counts fall back to the Worker's global stats.
+process.env.CLAUDE_MEM_DATA_DIR = join(tmpdir(), 'mem-cli-driver-no-db')
 const { default: plugin } = await import('../package-tui')
 const { WorkerClient } = await import('../worker-client')
 const statsFinished = Promise.withResolvers<void>()
@@ -60,6 +68,8 @@ let mutations = 0
 let slotDisposals = 0
 let eventDisposals = 0
 let toasts = 0
+const alerts: string[] = []
+const alerted = Promise.withResolvers<void>()
 let changed = Promise.withResolvers<void>()
 const memory: Storage['memory'] = (_key, options) => {
   const [state, setState] = createStore(options.initial)
@@ -168,6 +178,13 @@ const context = hostStub<Context>({
         toasts++
       },
     },
+    dialog: hostStub<Context['ui']['dialog']>({
+      alert(options) {
+        alerts.push(options.title)
+        alerted.resolve()
+        return Promise.resolve()
+      },
+    }),
   }),
 })
 let cleanup: Awaited<ReturnType<typeof plugin.setup>> = undefined
@@ -208,6 +225,15 @@ try {
     )
     console.log(ui.captureCharFrame().trimEnd())
     if (healthy) {
+      // The project prefix is dropped, each item shows its age, and a click opens details.
+      const shown = ui.captureCharFrame()
+      assert.ok(shown.includes('• Recent session fixture'), shown)
+      // Ages are measured from the start of the current minute: 12 minutes reads as 11 or 12.
+      assert.match(shown, /1[12]m ago · #2/)
+      const row = shown.split('\n').findIndex((line) => line.includes('Latest observation fixture'))
+      await ui.mockMouse.click(6, row)
+      await alerted.promise
+      assert.deepEqual(alerts, ['#2 Latest observation fixture'])
       assert.ok(recentProjects.length >= 2)
       assert.ok(recentProjects.every((project) => project === 'cli-fixture'))
       observations = 24
