@@ -12,12 +12,14 @@ export async function serveRuntimePackage(root: string) {
   const [code, stderr] = await Promise.all([pack.exited, new Response(pack.stderr).text()])
   assert.equal(code, 0, stderr)
   let downloads = 0
+  const paths: string[] = []
   const registry = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
     async fetch(request) {
       const url = new URL(request.url)
       const path = decodeURIComponent(url.pathname)
+      paths.push(path)
       if (path === '/mem-tui-fixture' || path.startsWith('/mem-tui-fixture/')) {
         const version = {
           name: 'mem-tui-fixture',
@@ -75,6 +77,10 @@ export async function serveRuntimePackage(root: string) {
     },
     get downloads() {
       return downloads
+    },
+    /** Every path requested so far, in order. */
+    get paths(): readonly string[] {
+      return paths
     },
     close: () => registry.stop(true),
   }

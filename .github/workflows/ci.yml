@@ -26,12 +26,12 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Test sidebar and package exports
+      - name: Test server part, sidebar and package exports
         run: bun test
 
       - name: Verify dist output
         run: |
-          for entry in tui cli package-tui; do
+          for entry in server tui cli package-tui; do
             test -f "dist/$entry.js" || (echo "dist/$entry.js missing" && exit 1)
             test -f "dist/$entry.d.ts" || (echo "dist/$entry.d.ts missing" && exit 1)
           done

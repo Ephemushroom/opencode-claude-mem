@@ -23,6 +23,7 @@ interface SidebarState {
 function emptyView(project: string): MemSidebarView {
   return {
     healthy: false,
+    capture: null,
     project,
     scope: 'all',
     totalObservations: null,
@@ -60,11 +61,8 @@ export default Plugin.define({
       return
     }
 
-    const project =
-      String(ctx.location?.directory ?? process.cwd())
-        .split(/[\\/]/)
-        .filter(Boolean)
-        .findLast(Boolean) ?? 'unknown-project'
+    const directory = String(ctx.location?.directory ?? process.cwd())
+    const project = directory.split(/[\\/]/).filter(Boolean).findLast(Boolean) ?? 'unknown-project'
     const [state, setState] = ctx.storage.memory<SidebarState>('claude-mem.sidebar', {
       initial: { collapsed: true, view: emptyView(project) },
     })
@@ -89,7 +87,7 @@ export default Plugin.define({
           const { collapsed } = state
           // Serialize reads: a pending toggle must use the latest collapse state.
           // eslint-disable-next-line no-await-in-loop
-          const next = await readMemView(project, collapsed)
+          const next = await readMemView(project, collapsed, directory)
           if (disposed) {
             return
           }

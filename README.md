@@ -18,10 +18,17 @@ The **Memory sidebar** for [OpenCode](https://opencode.ai), backed by
   Click an item for details           ← opens the full summary or observation
 ```
 
-From **v0.7.0** this package is sidebar only. Memory capture, context injection, search
-and the MCP tools come from the **official claude-mem OpenCode plugin**, which tracks the
-Worker's API in the same release. Earlier versions shipped their own capture adapter; it is
-removed so the two can never run side by side.
+One package brings claude-mem to OpenCode 2, installed and updated like any other plugin:
+
+- **Capture and context injection** run the **official claude-mem OpenCode plugin**. This
+  package downloads it at the running Worker's version (from the `claude-mem` npm release,
+  checked against the registry's sha512) and loads it, so capture always matches the
+  Worker's API and no file has to be copied by hand.
+- **Memory tools** beyond the official plugin's search: `save_memory`, `work_state_write`,
+  `work_state_read`, `dumb_search`, `get_tool_uses` and the six corpus tools, served straight
+  from the Worker's HTTP API. No MCP server is needed.
+- **The Worker is started** when nothing answers on its port.
+- **The Memory sidebar**, below.
 
 - Counts are for the current project (the directory name), matching the Worker's own
   project filter: case-insensitive, merged projects included. They are read from the Worker's
@@ -38,61 +45,81 @@ removed so the two can never run side by side.
 - Recent rows are fetched only while expanded; collapsed, it polls stats every 5s.
 - Read-only and fail-open: an offline Worker shows the offline state, never blocks the TUI.
 
-Tested with OpenCode **2.2.7** (`@opencode/plugin` 2.2.7, `@opentui/solid` 0.8.1). The V1
-sidebar contract is kept on the same `./tui` export.
+Verified on macOS with OpenCode **2.3.0** (built against `@opencode/plugin` 2.2.7,
+`@opentui/solid` 0.8.1). The Windows paths follow claude-mem's own launcher location but
+have not been run on Windows yet.
 
 ## Setup (OpenCode 2)
 
-1. **Install Claude-Mem** in Claude Code and make sure the Worker is healthy:
+1. **Install claude-mem** once per machine. This installs the Worker and its launcher:
 
    ```bash
-   curl -s http://127.0.0.1:37777/api/health
+   npx claude-mem install
    ```
 
-2. **Install the official server plugin.** OpenCode 2 auto-loads single files from
-   `~/.config/opencode/plugins/`; the file ships in the `claude-mem` npm package:
+2. **Add the plugin.** This installs the package and lists it in
+   `~/.config/opencode/opencode.json`:
 
    ```bash
-   mkdir -p ~/.config/opencode/plugins
-   cd "$(mktemp -d)" && npm pack claude-mem@latest --silent \
-     && tar -xzf claude-mem-*.tgz package/dist/opencode-plugin/index.js \
-     && cp package/dist/opencode-plugin/index.js ~/.config/opencode/plugins/claude-mem.js
+   opencode plugin add @ephemushroom/opencode-claude-mem
    ```
 
-   Claude-Mem's auto-update upgrades the Worker, not this copy: repeat this step after a
-   Worker upgrade.
-
-3. **Register the MCP server** (search, timeline, observations, `save_memory`,
-   `work_state_*`) in `~/.config/opencode/opencode.json`, under V2's `mcp.servers`:
-
-   ```json
-   {
-     "mcp": {
-       "servers": {
-         "claude-mem": {
-           "type": "local",
-           "command": [
-             "/opt/homebrew/bin/node",
-             "/Users/<you>/.claude/plugins/marketplaces/thedotmack/plugin/scripts/mcp-server.cjs"
-           ]
-         }
-       }
-     }
-   }
-   ```
-
-   Point at the marketplace path, not a versioned `plugins/cache/.../<version>/` path, so
-   Worker upgrades keep it valid. Prefer this over `npx claude-mem install --ide=opencode`,
-   which writes the V1 `mcp` shape.
-
-4. **Add the sidebar** to `~/.config/opencode/cli.json`:
+3. **Add the sidebar** to `~/.config/opencode/cli.json`:
 
    ```json
    { "plugins": ["@ephemushroom/opencode-claude-mem"] }
    ```
 
-5. **Remove this package from `opencode.json` `plugins`** if an older version put it there.
-   Both server plugins use the id `claude-mem`; keeping both captures every tool twice.
+Restart OpenCode. The first start downloads the official files (about 10 MB) in the
+background; the memory tools work at once, and capture begins when the download finishes.
+
+### Updating
+
+```bash
+opencode plugin update     # this package: server part and sidebar
+```
+
+OpenCode does not update plugins by itself. The official claude-mem files need no command:
+after a Worker upgrade, the next OpenCode start fetches the matching version.
+
+### Options
+
+```json
+{
+  "plugins": [{ "package": "@ephemushroom/opencode-claude-mem", "options": { "mcp": true } }]
+}
+```
+
+- `mcp: true` registers claude-mem's own MCP server (every tool it has, including the
+  `smart_*` code-outline tools) in a separate process, instead of this package's tools.
+  A `claude-mem` entry you wrote under `mcp.servers` is left as it is.
+
+claude-mem's settings apply as usual (its `settings.json`, in `~/.claude-mem` or
+`CLAUDE_MEM_DATA_DIR`, or the environment):
+
+- `CLAUDE_MEM_WORKER_HOST` / `CLAUDE_MEM_WORKER_PORT` select the Worker. Without a port,
+  claude-mem's own default applies (37700 plus the last two digits of the user id).
+- `CLAUDE_MEM_LOCAL_API_TOKEN` is sent to a Worker on this machine that requires it. This
+  package's own requests refuse redirects; the official plugin's capture requests are
+  claude-mem's code and follow them (as of 15.18.3).
+- `CLAUDE_MEM_WORKER_AUTOSTART=false` keeps this package from starting the Worker.
+- `CLAUDE_MEM_WORK_STATE_ENABLED=false` removes the two work-state tools.
+- `CLAUDE_MEM_WORKER_URL` is not supported: the official OpenCode plugin addresses the
+  Worker by host and port only, so the sidebar reports it and nothing is captured.
+
+### Tools
+
+OpenCode lists them as the `claude_mem` namespace (`tools.claude_mem.save_memory(...)` in
+Code Mode, `claude_mem_save_memory` as a direct tool call). The official plugin adds
+`claude_mem_search`, `claude_mem_timeline` and `claude_mem_get_observations`.
+
+| Tool | Purpose |
+|---|---|
+| `save_memory` | Save a durable note |
+| `work_state_write` / `work_state_read` | Per-project to-do lists and working state, shown at session start |
+| `dumb_search` | One-call lookup by title overlap |
+| `get_tool_uses` | Raw tool input/output for selected ids |
+| `build_corpus`, `list_corpora`, `prime_corpus`, `query_corpus`, `rebuild_corpus`, `reprime_corpus` | Knowledge corpora |
 
 ### Share memory across Claude Code and OpenCode
 
@@ -106,52 +133,75 @@ add this to `~/.claude-mem/settings.json` (it also applies to Claude Code's sess
 ### Verify
 
 ```bash
-opencode plugin list   # claude-mem  local  ~/.config/opencode/plugins/claude-mem.js
-opencode mcp list      # ✓ claude-mem connected
+opencode plugin list   # opencode-claude-mem  0.7.1  @ephemushroom/opencode-claude-mem
 ```
 
 Open a session: the sidebar shows `▶ Memory (online, …)`, and new observations carry
 canonical tool names (`Read`, `Edit`, `Bash`) with `files_modified` filled in.
 
-## Migrating from v0.6.x
+### Where files go
 
-v0.6.x registered `@ephemushroom/opencode-claude-mem` as a **server** plugin. Its capture,
-`mem-*` tools, file-history enrichment and semantic injection are gone:
+`~/.cache/opencode-claude-mem/` (or `$XDG_CACHE_HOME/opencode-claude-mem/`): the official
+files under `official/<version>/` (about 1.5 MB per claude-mem version; earlier versions are
+kept, because another OpenCode process may still run from them) and `status/`, which carries
+the server part's state to the sidebar. Deleting the directory while OpenCode is closed is
+safe.
 
-| v0.6.x | Now |
-|---|---|
-| `mem-search` / `mem-timeline` / `mem-get-observations` | `claude_mem_search` / `claude_mem_timeline` / `claude_mem_get_observations` (official plugin) and the MCP `search` / `timeline` / `get_observations` |
-| `mem-save` | MCP `save_memory` |
-| Read-file history appended to `read` output | Not available |
-| Opt-in semantic injection | Not available |
+## Migrating
 
-Follow steps 2–5 above, then keep the bare name in `cli.json` (and `tui.json` for V1).
+**From v0.7.0's manual setup.** Remove what the manual steps installed, then follow Setup:
+
+- delete `~/.config/opencode/plugins/claude-mem.js`. While that file exists it keeps
+  capturing, this package does not load a second copy, and that file is not kept up to date;
+- delete the `claude-mem` entry under `mcp.servers` in `opencode.json`, unless you want
+  the MCP server; in that case use `options.mcp` instead.
+
+**From v0.6.x.** Its own capture adapter is gone; capture is the official plugin's.
+`mem-search` / `mem-timeline` / `mem-get-observations` are now `claude_mem_search` /
+`claude_mem_timeline` / `claude_mem_get_observations`, and `mem-save` is `save_memory`.
+Read-file history and opt-in semantic injection are not available.
+
+**OpenCode 1.** The server part needs OpenCode 2. On OpenCode 1 use
+`npx claude-mem install --ide opencode`; the sidebar still loads from `tui.json`.
 
 ## Troubleshooting
 
-- **`(offline)`**: the Worker is not running. Start Claude Code, or `bunx claude-mem start`.
+- **`(offline)`**: the Worker is not running and could not be started. Run
+  `npx claude-mem start`; if that command is missing, `npx claude-mem install`.
+- **`(capture off)`**: nothing records this OpenCode's sessions. Expand the sidebar: the
+  first row says why (claude-mem not installed, the Worker did not start, the download
+  failed, or a `plugins/claude-mem.js` file that OpenCode has not loaded) and what to do.
+  The package looks again every minute.
 - **Sidebar missing**: check `~/.config/opencode/cli.json` lists the package; the sidebar
   needs OpenCode's `@opentui/solid` runtime and is skipped silently without it.
-- **Duplicate observations**: two capture integrations are active. Remove this package from
-  `opencode.json` `plugins`, and disable any Claude Code compatibility bridge for claude-mem.
-- **MCP not listed in an open session**: run `/reload`; already-open locations may keep the
-  previous MCP set until they reload.
+- **Duplicate observations**: two capture integrations are active. Remove
+  `~/.config/opencode/plugins/claude-mem.js` or this package, and disable any Claude Code
+  compatibility bridge for claude-mem. In Code Mode one call is recorded as `execute` plus
+  the tool it ran; that is one call, not a duplicate.
+- **Behind a registry mirror**: the download uses `CLAUDE_MEM_NPM_REGISTRY`, then
+  `npm_config_registry`, then `https://registry.npmjs.org`. The mirror must be HTTPS (or on
+  this machine): it names both the tarball and its checksum, so it is trusted like the
+  registry itself.
 
 ## Development
 
 ```bash
 bun install
-bun run build          # sidebar adapters + TUI bridge + declarations
+bun run build          # server part + sidebar adapters + TUI bridge + declarations
 bun test               # build first: export tests import dist artifacts
 bun run typecheck && bun run lint && bun run fmt:check
+bun src/test-fixtures/server-runtime.ts        # installed opencode: download, capture, tools
+bun src/test-fixtures/server-runtime.ts mcp    # options.mcp registers the MCP server
+bun src/test-fixtures/server-runtime.ts start  # no Worker: the launcher is run (macOS/Linux)
+bun src/test-fixtures/server-runtime.ts standalone  # plugins/claude-mem.js present: one capture
 bun src/test-fixtures/tui-runtime.ts           # installed opencode: real PTY, render + mouse toggle
 bun src/test-fixtures/tui-runtime.ts offline   # offline state renders and toggles
 bun --conditions=browser src/test-fixtures/cli-driver.ts render   # OpenTUI component driver
 ```
 
-The PTY check packs the current build, serves it from a temporary local registry, and runs
-the installed `opencode` in an isolated home with a fake Worker. It never touches your config
-or memory database and never calls a model. Set `MEM_TUI_EVIDENCE_DIR` to keep the captured
+The runtime checks pack the current build, serve it from a temporary local registry, and run
+the installed `opencode` in an isolated home with a fake Worker and model. They never touch
+your config or memory database. The server check downloads the real `claude-mem` release. Set `MEM_TUI_EVIDENCE_DIR` to keep the captured
 collapsed, expanded, detail-dialog and re-collapsed frames.
 
 ## License

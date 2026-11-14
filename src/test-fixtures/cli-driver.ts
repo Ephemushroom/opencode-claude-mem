@@ -5,6 +5,7 @@ import { createStore, produce } from 'solid-js/store'
 import assert from 'node:assert/strict'
 import { createSignal } from 'solid-js'
 import { join } from 'node:path'
+import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
 const scenario = process.argv[2] ?? 'render'
@@ -50,6 +51,16 @@ process.env.CLAUDE_MEM_WORKER_HOST = '127.0.0.1'
 process.env.CLAUDE_MEM_WORKER_PORT = String(server.port)
 // No fixture database: project counts fall back to the Worker's global stats.
 process.env.CLAUDE_MEM_DATA_DIR = join(tmpdir(), 'mem-cli-driver-no-db')
+// The server part's status file lives in the cache directory; keep this machine's out.
+process.env.XDG_CACHE_HOME = join(tmpdir(), `mem-cli-driver-cache-${process.pid}`)
+const CAPTURE_OFF = 'capture off · claude-mem is not installed: npx claude-mem install'
+const CHECKOUT = 'D:/work/cli-fixture'
+if (scenario === 'capture-off') {
+  // What the server part writes when nothing captures this checkout's sessions.
+  const { captureStatusWriter } = await import('../capture-status')
+  captureStatusWriter(CHECKOUT).write({ state: 'problem', message: CAPTURE_OFF })
+}
+const collapsedLabel = scenario === 'capture-off' ? '(capture off)' : '(online,'
 const { default: plugin } = await import('../package-tui')
 const { WorkerClient } = await import('../worker-client')
 const statsFinished = Promise.withResolvers<void>()
@@ -132,7 +143,7 @@ function hostStub<T extends object>(properties: Partial<T>): T {
   }) as T
 }
 const context = hostStub<Context>({
-  location: { directory: 'D:/work/cli-fixture' },
+  location: { directory: CHECKOUT },
   // Host-provided resolved tokens; importing the legacy theme runtime would load a second core.
   theme: hostStub<Context['theme']>({
     text: hostStub<Context['theme']['text']>({
@@ -216,7 +227,8 @@ try {
       await ui.mockMouse.click(3, 1)
       held.resolve()
     } else {
-      await waitForFrame((frame) => frame.includes(healthy ? '12 obs' : '(offline)'))
+      const initial = scenario === 'capture-off' ? collapsedLabel : '12 obs'
+      await waitForFrame((frame) => frame.includes(healthy ? initial : '(offline)'))
       console.log(ui.captureCharFrame().trimEnd())
       await ui.mockMouse.click(3, 1)
     }
@@ -227,6 +239,11 @@ try {
     if (healthy) {
       // The project prefix is dropped, each item shows its age, and a click opens details.
       const shown = ui.captureCharFrame()
+      if (scenario === 'capture-off') {
+        // The notice names the fix and sits above the counts.
+        assert.ok(shown.includes('! capture off · claude-mem is not installed'), shown)
+        assert.ok(shown.indexOf('capture off ·') < shown.indexOf('obs 12'), shown)
+      }
       assert.ok(shown.includes('• Recent session fixture'), shown)
       // Ages are measured from the start of the current minute: 12 minutes reads as 11 or 12.
       assert.match(shown, /1[12]m ago · #2/)
@@ -248,7 +265,7 @@ try {
     }
     await ui.mockMouse.click(3, 1)
     await waitForFrame(
-      (frame) => frame.includes('(online,') && !frame.includes('Latest observation fixture')
+      (frame) => frame.includes(collapsedLabel) && !frame.includes('Latest observation fixture')
     )
     ui.resize(40, 18)
     await ui.renderOnce()
@@ -260,4 +277,5 @@ try {
   await cleanup?.()
   ui.renderer.destroy()
   await server.stop(true)
+  rmSync(process.env.XDG_CACHE_HOME ?? '', { recursive: true, force: true })
 }

@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-15
+
+### Added
+
+- **Server part (`./server`, OpenCode 2).** Add the package to `opencode.json` and it
+  downloads the official claude-mem OpenCode plugin at the running Worker's version,
+  verifies it against the registry's sha512 and loads it. Nothing is copied by hand, and a
+  Worker upgrade is followed on the next OpenCode start. See README "Setup".
+- Memory tools served from the Worker's HTTP API, in the `claude_mem` namespace:
+  `save_memory`, `work_state_write`, `work_state_read`, `dumb_search`, `get_tool_uses`,
+  `build_corpus`, `list_corpora`, `prime_corpus`, `query_corpus`, `rebuild_corpus`,
+  `reprime_corpus`. No MCP server is required.
+- Starts the Worker through claude-mem's launcher when nothing answers on its port. A
+  Worker that answers is never restarted or replaced.
+- `options.mcp: true` registers claude-mem's MCP server at runtime instead of the tools.
+- Sidebar shows `(capture off)` and the reason when nothing is capturing.
+
+### Changed
+
+- The package is no longer sidebar only. A standalone `plugins/claude-mem.js` that OpenCode
+  has loaded still wins: this package does not load a second copy of the official plugin.
+  A file OpenCode has not loaded is reported in the sidebar instead of being trusted.
+
+### Fixed
+
+- The sidebar finds the Worker the way claude-mem does: `settings.json` in
+  `CLAUDE_MEM_DATA_DIR`, claude-mem's default port when none is configured (37700 plus the
+  user id's last two digits, not always 37777), and an IPv6 host. It also sends
+  `CLAUDE_MEM_LOCAL_API_TOKEN` to a local Worker that requires it, instead of showing
+  `(offline)`.
+
+
 ## [0.7.0] - 2026-11-13
 
 ### Changed

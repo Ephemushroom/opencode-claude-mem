@@ -85,8 +85,9 @@ const tuiModule = {
       ]
     }
 
-    const project = projectNameFromDirectory(String(api.state?.path?.directory ?? ''))
-    const initialView = await readMemView(project, true)
+    const directory = String(api.state?.path?.directory ?? '')
+    const project = projectNameFromDirectory(directory)
+    const initialView = await readMemView(project, true, directory)
     const [collapsed, setCollapsed] = signal(true)
     const [view, setView] = signal(initialView)
     let currentKey = viewKey(initialView)
@@ -95,7 +96,7 @@ const tuiModule = {
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const refresh = async () => {
-      const nextView = await readMemView(project, collapsed())
+      const nextView = await readMemView(project, collapsed(), directory)
       const nextKey = viewKey(nextView)
       if (nextKey !== currentKey) {
         currentKey = nextKey

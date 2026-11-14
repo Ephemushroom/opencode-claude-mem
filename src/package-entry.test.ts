@@ -30,10 +30,16 @@ test('exposes both sidebar contracts when the host selects the tui export', asyn
   expect(plugin.server).toBeUndefined()
 })
 
-test('ships no server part, so it cannot compete with the official claude-mem plugin', () => {
+test('ships a server part under its own id, beside the sidebar', async () => {
   // Given the shipped manifest; when its exports are listed.
   const exports = Object.keys(manifest.exports)
-  // Then only the sidebar bridge and its legacy V2 alias remain.
-  expect(exports).toEqual(['./tui', './cli'])
+  // Then the server entry sits beside the sidebar bridge and its legacy V2 alias.
+  expect(exports).toEqual(['./server', './tui', './cli'])
   expect(manifest.exports['./cli'].import).toBe('./dist/cli.js')
+  // And the server plugin does not take the official plugin's `claude-mem` id, which
+  // `opencode.json` uses to disable that plugin.
+  const entry = pathToFileURL(resolve(import.meta.dir, '..', manifest.exports['./server'].import))
+  const { default: plugin } = await import(entry.href)
+  expect(plugin.id).toBe('opencode-claude-mem')
+  expect(typeof plugin.setup).toBe('function')
 })

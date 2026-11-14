@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 
-test.each(['render', 'offline', 'inflight-toggle', 'dispose'])(
+test.each(['render', 'offline', 'capture-off', 'inflight-toggle', 'dispose'])(
   'CLI beta contract: %s',
   async (scenario) => {
     // Given a fresh process with the host's reactive Solid export conditions.

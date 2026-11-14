@@ -1,12 +1,16 @@
 {
   "name": "@ephemushroom/opencode-claude-mem",
-  "version": "0.7.0",
-  "description": "OpenCode Memory sidebar for Claude-Mem; pairs with the official claude-mem OpenCode plugin",
+  "version": "0.7.1",
+  "description": "Claude-Mem for OpenCode: capture through the official claude-mem plugin, memory tools and the Memory sidebar in one package",
   "type": "module",
   "files": [
     "dist"
   ],
   "exports": {
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
     "./tui": {
       "types": "./dist/package-tui.d.ts",
       "import": "./dist/package-tui.js"
@@ -17,7 +21,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/tui.ts --outfile dist/tui.js --target bun --format esm --external @opentui/solid --external solid-js && bun build src/cli.ts --outfile dist/cli.js --target bun --format esm --external @opentui/solid --external solid-js && bun src/build-tui-bridge.ts && tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "build": "bun build src/server.ts --outfile dist/server.js --target bun --format esm && bun build src/tui.ts --outfile dist/tui.js --target bun --format esm --external @opentui/solid --external solid-js && bun build src/cli.ts --outfile dist/cli.js --target bun --format esm --external @opentui/solid --external solid-js && bun src/build-tui-bridge.ts && tsc -p tsconfig.build.json --emitDeclarationOnly",
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
     "lint": "oxlint",

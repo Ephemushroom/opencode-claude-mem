@@ -1,3 +1,4 @@
+import { type CaptureStatus, readCaptureStatus } from './capture-status'
 import { WorkerClient } from './worker-client'
 
 export const POLL_INTERVAL_MS = 5000
@@ -17,6 +18,8 @@ export const OBSERVATION_TYPE_ICONS: Record<string, string> = {
 
 export interface MemSidebarView {
   readonly healthy: boolean
+  /** What this package's server part reported; null when it is not loaded. */
+  readonly capture: CaptureStatus | null
   readonly project: string
   /** `project` when counts come from the Worker database; `all` for the global fallback. */
   readonly scope: 'project' | 'all'
@@ -136,6 +139,9 @@ export function summaryLine(view: MemSidebarView): { label: string; tone: 'ok' |
   if (!view.healthy) {
     return { label: '(offline)', tone: 'err' }
   }
+  if (view.capture?.state === 'problem') {
+    return { label: '(capture off)', tone: 'err' }
+  }
   if (view.isProcessing || (view.queueDepth ?? 0) > 0) {
     return { label: `(queue ${view.queueDepth ?? 0})`, tone: 'warn' }
   }
@@ -187,12 +193,29 @@ export function expandedRows(
   theme: Theme,
   onSelect?: RecentItemHandler
 ): ViewNode[] {
+  // The server part's message names the fix (a command to run), so it wraps instead of
+  // being cut to one line.
+  const notice = view.capture?.message
+    ? [
+        box({ flexDirection: 'row', gap: 1 }, [
+          text({ fg: theme.warning, flexShrink: 0 }, '!'),
+          text(
+            {
+              fg: view.capture.state === 'problem' ? theme.error : theme.warning,
+              wrapMode: 'word',
+            },
+            view.capture.message
+          ),
+        ]),
+      ]
+    : []
   if (!view.healthy) {
-    return [bulletRow('•', theme.error, 'worker offline', theme)]
+    return [bulletRow('•', theme.error, 'worker offline', theme), ...notice]
   }
 
   const counts = `obs ${formatCount(view.observations)} · sum ${formatCount(view.summaries)} · ses ${formatCount(view.sessions)}`
   const rows: ViewNode[] = [
+    ...notice,
     bulletRow('•', theme.success, view.scope === 'all' ? `all · ${counts}` : counts, theme),
   ]
   if (view.scope === 'project') {
@@ -285,14 +308,20 @@ function readCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-export async function readMemView(project: string, collapsed: boolean): Promise<MemSidebarView> {
+export async function readMemView(
+  project: string,
+  collapsed: boolean,
+  directory = ''
+): Promise<MemSidebarView> {
   const [stats, counts] = await Promise.all([
     WorkerClient.getStats(),
     WorkerClient.getProjectCounts(project),
   ])
+  const capture = directory ? readCaptureStatus(directory) : null
   if (!stats) {
     return {
       healthy: false,
+      capture,
       project,
       scope: 'all',
       totalObservations: null,
@@ -319,6 +348,7 @@ export async function readMemView(project: string, collapsed: boolean): Promise<
   const totalObservations = readCount(stats.database?.observations)
   return {
     healthy: true,
+    capture,
     project,
     scope: counts ? 'project' : 'all',
     totalObservations,
