@@ -1,4 +1,5 @@
 import {
+  type MemDetail,
   type MemSidebarView,
   POLL_INTERVAL_MS,
   type RecentItemHandler,
@@ -9,7 +10,8 @@ import {
   readMemView,
   viewKey,
 } from './sidebar-model'
-import type { JSX, createElement, insert, setProp } from '@opentui/solid'
+import type { JSX, createElement, insert, onResize, setProp } from '@opentui/solid'
+import type { Context } from '@opencode/plugin/tui/context'
 import { Plugin } from '@opencode/plugin/tui'
 import type { ResolvedTheme } from '@opencode/theme/tui'
 
@@ -136,7 +138,9 @@ export default Plugin.define({
             })
             return
           }
-          return ctx.ui.dialog.alert(detail)
+          return new Promise<void>((closed) => {
+            ctx.ui.dialog.show(() => renderDetail(ctx, solid, detail), closed)
+          })
         })
         .catch(() => {})
         .finally(() => {
@@ -231,6 +235,55 @@ interface SolidRuntime {
   createElement: typeof createElement
   setProp: typeof setProp
   insert: typeof insert
+}
+
+function renderDetail(
+  ctx: Context,
+  solid: SolidRuntime & { onResize: typeof onResize },
+  detail: MemDetail
+): JSX.Element {
+  // Set presentation on the active host modal, not on the sidebar's layout.
+  ctx.ui.dialog.set({ size: 'xlarge', centered: true })
+  const panel = solid.createElement('box')
+  solid.setProp(panel, 'flexDirection', 'column')
+  solid.setProp(panel, 'padding', 1)
+  solid.setProp(panel, 'gap', 1)
+  const header = solid.createElement('box')
+  solid.setProp(header, 'flexDirection', 'row')
+  solid.setProp(header, 'gap', 2)
+  const title = solid.createElement('text')
+  solid.setProp(title, 'fg', ctx.theme.text.base)
+  solid.setProp(title, 'attributes', 1)
+  solid.setProp(title, 'flexGrow', 1)
+  solid.setProp(title, 'wrapMode', 'none')
+  solid.setProp(title, 'truncate', true)
+  solid.insert(title, detail.title)
+  solid.insert(header, title)
+  const close = solid.createElement('text')
+  solid.setProp(close, 'fg', ctx.theme.text.muted)
+  solid.setProp(close, 'flexShrink', 0)
+  solid.setProp(close, 'onMouseUp', (event: { button: number }) => {
+    if (event.button === 0) {
+      ctx.ui.dialog.clear()
+    }
+  })
+  solid.insert(close, 'esc close')
+  solid.insert(header, close)
+  solid.insert(panel, header)
+
+  const body = solid.createElement('scrollbox')
+  solid.setProp(body, 'scrollX', false)
+  const sizeBody = (height: number) =>
+    solid.setProp(body, 'maxHeight', Math.max(1, Math.floor(height * 0.75) - 4))
+  sizeBody(ctx.renderer.height)
+  solid.onResize((_width, height) => sizeBody(height))
+  const message = solid.createElement('text')
+  solid.setProp(message, 'fg', ctx.theme.text.base)
+  solid.setProp(message, 'wrapMode', 'word')
+  solid.insert(message, detail.message)
+  solid.insert(body, message)
+  solid.insert(panel, body)
+  return panel
 }
 
 function materializeNode(node: ViewNode, solid: SolidRuntime): JSX.Element {

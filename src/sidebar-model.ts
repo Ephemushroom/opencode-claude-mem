@@ -173,6 +173,30 @@ export function bulletRow(
   ])
 }
 
+/** Finish the click before changing the layout or putting a modal under the pointer. */
+function leftClick(action: () => void) {
+  let pressed = false
+  return {
+    onMouseDown(event: { button: number }) {
+      pressed = event.button === 0
+    },
+    onMouseDrag() {
+      pressed = false
+    },
+    onMouseOut() {
+      pressed = false
+    },
+    onMouseUp(event: { button: number; stopPropagation(): void }) {
+      const clicked = pressed && event.button === 0
+      pressed = false
+      if (clicked) {
+        event.stopPropagation()
+        action()
+      }
+    },
+  }
+}
+
 /** A recent item: its title, then a muted age line, clickable when a handler is given. */
 function recentRow(
   icon: string,
@@ -182,7 +206,7 @@ function recentRow(
   theme: Theme,
   onSelect: (() => void) | undefined
 ): ViewNode {
-  return box({ flexDirection: 'column', ...(onSelect ? { onMouseDown: onSelect } : {}) }, [
+  return box({ flexDirection: 'column', ...(onSelect ? leftClick(onSelect) : {}) }, [
     bulletRow(icon, iconColor, title, theme),
     ...(age ? [box({ paddingLeft: 2 }, [label(theme.textMuted, age)])] : []),
   ])
@@ -281,7 +305,7 @@ export function buildMemNodes(
   onSelect?: RecentItemHandler
 ): ViewNode[] {
   const summary = summaryLine(view)
-  const header = box({ flexDirection: 'row', gap: 1, onMouseDown: onToggle }, [
+  const header = box({ flexDirection: 'row', gap: 1, ...leftClick(onToggle) }, [
     text({ fg: theme.text, flexShrink: 0 }, collapsed ? '▶' : '▼'),
     // TextAttributes.BOLD; keep this shared model independent of the native TUI runtime.
     text({ fg: theme.info, attributes: 1, flexShrink: 0 }, 'Memory'),

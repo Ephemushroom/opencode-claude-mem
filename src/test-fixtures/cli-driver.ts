@@ -63,6 +63,12 @@ if (scenario === 'capture-off') {
 const collapsedLabel = scenario === 'capture-off' ? '(capture off)' : '(online,'
 const { default: plugin } = await import('../package-tui')
 const { WorkerClient } = await import('../worker-client')
+let detailRequests = 0
+const getDetail = WorkerClient.getDetail.bind(WorkerClient)
+WorkerClient.getDetail = (...args) => {
+  detailRequests++
+  return getDetail(...args)
+}
 const statsFinished = Promise.withResolvers<void>()
 const getStats = WorkerClient.getStats.bind(WorkerClient)
 WorkerClient.getStats = async () => {
@@ -79,7 +85,8 @@ let mutations = 0
 let slotDisposals = 0
 let eventDisposals = 0
 let toasts = 0
-const alerts: string[] = []
+const [dialog, setDialog] = createSignal<Parameters<Context['ui']['dialog']['show']>[0]>()
+let onDialogClosed: (() => void) | undefined = undefined
 const alerted = Promise.withResolvers<void>()
 let changed = Promise.withResolvers<void>()
 const memory: Storage['memory'] = (_key, options) => {
@@ -98,6 +105,10 @@ const ui = await testRender(
   () => {
     const root = createElement('box')
     insert(root, () => {
+      const modal = dialog()
+      if (modal) {
+        return createComponent(modal, {})
+      }
       const current = claim()
       return current
         ? createComponent(() => current.render({ sessionID: 'fixture-session' }), {})
@@ -143,6 +154,7 @@ function hostStub<T extends object>(properties: Partial<T>): T {
   }) as T
 }
 const context = hostStub<Context>({
+  renderer: ui.renderer,
   location: { directory: CHECKOUT },
   // Host-provided resolved tokens; importing the legacy theme runtime would load a second core.
   theme: hostStub<Context['theme']>({
@@ -190,10 +202,17 @@ const context = hostStub<Context>({
       },
     },
     dialog: hostStub<Context['ui']['dialog']>({
-      alert(options) {
-        alerts.push(options.title)
+      show(render, onClose) {
+        onDialogClosed = onClose
+        setDialog(() => render)
         alerted.resolve()
-        return Promise.resolve()
+      },
+      set(options) {
+        assert.deepEqual(options, { size: 'xlarge', centered: true })
+      },
+      clear() {
+        setDialog(undefined)
+        onDialogClosed?.()
       },
     }),
   }),
@@ -248,9 +267,15 @@ try {
       // Ages are measured from the start of the current minute: 12 minutes reads as 11 or 12.
       assert.match(shown, /1[12]m ago · #2/)
       const row = shown.split('\n').findIndex((line) => line.includes('Latest observation fixture'))
-      await ui.mockMouse.click(6, row)
+      await ui.mockMouse.click(6, row, 2)
+      assert.equal(detailRequests, 0, 'right-click is not selection')
+      await ui.mockMouse.pressDown(6, row)
+      assert.equal(detailRequests, 0, 'a held press must not open the detail under the pointer')
+      await ui.mockMouse.release(6, row)
       await alerted.promise
-      assert.deepEqual(alerts, ['#2 Latest observation fixture'])
+      await ui.renderOnce()
+      assert.ok(ui.captureCharFrame().includes('#2 Latest observation fixture'))
+      context.ui.dialog.clear()
       assert.ok(recentProjects.length >= 2)
       assert.ok(recentProjects.every((project) => project === 'cli-fixture'))
       observations = 24
