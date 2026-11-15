@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-16
+
+### Fixed
+
 - Memory details open on left-button release, in a wide, centered dialog. Long entries wrap and scroll without moving the sidebar; Esc closes the dialog.
 
 ## [0.7.1] - 2026-11-15

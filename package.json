@@ -1,6 +1,6 @@
 {
   "name": "@ephemushroom/opencode-claude-mem",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Claude-Mem for OpenCode: capture through the official claude-mem plugin, memory tools and the Memory sidebar in one package",
   "type": "module",
   "files": [
