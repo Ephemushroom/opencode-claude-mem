@@ -35,7 +35,14 @@ const server = Bun.serve({
       return Response.json({ queueDepth: 0, isProcessing: false })
     }
     if (url.pathname === '/api/observation/2') {
-      return Response.json({ id: 2, type: 'feature', title: 'Latest observation fixture' })
+      return Response.json({
+        id: 2,
+        type: 'feature',
+        title: 'Latest observation fixture',
+        subtitle: 'Rendered via Markdown',
+        narrative: 'Supports **bold** and `inline code`.',
+        facts: '["First fact","Second fact"]',
+      })
     }
     recentProjects.push(url.searchParams.get('project') ?? '')
     const at = Date.now() - 12 * 60_000
@@ -173,6 +180,33 @@ const context = hostStub<Context>({
       }),
     }),
     border: { base: RGBA.fromHex('#444444') },
+    markdown: {
+      text: RGBA.fromHex('#eeeeee'),
+      heading: RGBA.fromHex('#bb99ff'),
+      link: RGBA.fromHex('#66aaff'),
+      linkText: RGBA.fromHex('#88ccff'),
+      code: RGBA.fromHex('#66cc88'),
+      blockQuote: RGBA.fromHex('#888888'),
+      emphasis: RGBA.fromHex('#ddbb66'),
+      strong: RGBA.fromHex('#ee9955'),
+      horizontalRule: RGBA.fromHex('#444444'),
+      listItem: RGBA.fromHex('#66aaff'),
+      listEnumeration: RGBA.fromHex('#66aaff'),
+      image: RGBA.fromHex('#66aaff'),
+      imageText: RGBA.fromHex('#88ccff'),
+      codeBlock: RGBA.fromHex('#eeeeee'),
+    },
+    syntax: {
+      comment: RGBA.fromHex('#888888'),
+      keyword: RGBA.fromHex('#bb99ff'),
+      function: RGBA.fromHex('#66aaff'),
+      variable: RGBA.fromHex('#eeeeee'),
+      string: RGBA.fromHex('#66cc88'),
+      number: RGBA.fromHex('#ddbb66'),
+      type: RGBA.fromHex('#88ccff'),
+      operator: RGBA.fromHex('#eeeeee'),
+      punctuation: RGBA.fromHex('#aaaaaa'),
+    },
   }),
   storage: hostStub<Context['storage']>({ memory }),
   data: hostStub<Context['data']>({
@@ -273,8 +307,22 @@ try {
       assert.equal(detailRequests, 0, 'a held press must not open the detail under the pointer')
       await ui.mockMouse.release(6, row)
       await alerted.promise
-      await ui.renderOnce()
-      assert.ok(ui.captureCharFrame().includes('#2 Latest observation fixture'))
+      // Markdown blocks highlight asynchronously via tree-sitter; wait for the rendered body.
+      let dialogFrame = ''
+      const dialogDeadline = Date.now() + 3000
+      while (Date.now() < dialogDeadline) {
+        // eslint-disable-next-line no-await-in-loop
+        await ui.renderOnce()
+        dialogFrame = ui.captureCharFrame()
+        if (dialogFrame.includes('Supports bold and inline code.')) {
+          break
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await Bun.sleep(25)
+      }
+      assert.ok(dialogFrame.includes('#2 Latest observation fixture'), dialogFrame)
+      assert.ok(dialogFrame.includes('Supports bold and inline code.'), dialogFrame)
+      assert.ok(dialogFrame.includes('- First fact'), dialogFrame)
       context.ui.dialog.clear()
       assert.ok(recentProjects.length >= 2)
       assert.ok(recentProjects.every((project) => project === 'cli-fixture'))

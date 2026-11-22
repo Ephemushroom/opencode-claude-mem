@@ -37,7 +37,7 @@ describe('formatAge', () => {
 })
 
 describe('describeDetail', () => {
-  test('renders an observation with its facts and a lookup hint', () => {
+  test('renders an observation as Markdown with facts and a lookup hint', () => {
     const detail = describeDetail('observation', 7, {
       title: 'Fix &amp; ship',
       subtitle: 'Short',
@@ -47,18 +47,29 @@ describe('describeDetail', () => {
       files_modified: '[]',
     })
     expect(detail?.title).toBe('#7 Fix & ship')
-    expect(detail?.message).toContain('Facts\n• one\n• two')
+    expect(detail?.message).toContain('*Short*')
+    expect(detail?.message).toContain('### Facts\n- one\n- two')
     expect(detail?.message).not.toContain('Files modified')
-    expect(detail?.message).toContain('get_observations([7])')
+    expect(detail?.message).toContain('`get_observations([7])`')
   })
 
-  test('renders a session summary from its <item> lists', () => {
+  test('renders files_modified as inline code items', () => {
+    const detail = describeDetail('observation', 8, {
+      title: 'With files',
+      files_modified: '["src/cli.ts","src/sidebar-model.ts"]',
+    })
+    expect(detail?.message).toContain(
+      '### Files modified\n- `src/cli.ts`\n- `src/sidebar-model.ts`'
+    )
+  })
+
+  test('renders a session summary from its <item> lists as Markdown', () => {
     const detail = describeDetail('summary', 3, {
       request: 'Ship 0.7.0',
       learned: '<item>a</item>\n<item>b</item>',
     })
     expect(detail?.title).toBe('Ship 0.7.0')
-    expect(detail?.message).toContain('Learned\n• a\n• b')
+    expect(detail?.message).toContain('### Learned\n- a\n- b')
     expect(describeDetail('summary', 3, null)).toBeNull()
   })
 })

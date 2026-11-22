@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-22
+
+### Changed
+
+- Memory details render as Markdown using OpenTUI's `<markdown>` element and the host theme's `markdown` / `syntax` styles (`###` headings, `-` lists, inline code for `files_modified`, fenced code highlighting, horizontal rule, and `conceal`).
+
 ## [0.7.2] - 2026-11-16
 
 ### Fixed

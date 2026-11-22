@@ -106,6 +106,10 @@ export async function driveSidebar(
           await writeFile(join(evidence, 'detail.ansi'), ansi)
           assertDialogBounds(frame, backgrounds)
           assert.ok(
+            frame.includes('Checks Markdown rendering inside renderDetail.'),
+            'detail must render concealed Markdown'
+          )
+          assert.ok(
             !frame.includes('Detail scroll end marker'),
             'long detail must overflow the viewport'
           )

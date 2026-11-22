@@ -397,17 +397,18 @@ function field(record: Record<string, unknown>, key: string): string {
   return typeof value === 'string' ? decodeEntities(value).trim() : ''
 }
 
-/** `<item>` lists (summaries) or JSON string arrays (facts, files) as bullet lines. */
-function listLines(value: string): string[] {
+/** `<item>` lists (summaries) or JSON string arrays (facts, files) as Markdown list items. */
+function listLines(value: string, codeItems = false): string[] {
+  const wrap = (item: string) => (codeItems ? `- \`${item.replaceAll('`', '')}\`` : `- ${item}`)
   const items = [...value.matchAll(/<item>([\s\S]*?)<\/item>/g)].map((match) => match[1] ?? '')
   if (items.length > 0) {
-    return items.map((item) => `• ${item.trim()}`)
+    return items.map((item) => wrap(item.trim()))
   }
   if (value.startsWith('[')) {
     try {
       const parsed: unknown = JSON.parse(value)
       if (Array.isArray(parsed)) {
-        return parsed.filter((item) => typeof item === 'string').map((item) => `• ${item}`)
+        return parsed.filter((item) => typeof item === 'string').map(wrap)
       }
     } catch {
       // Not JSON: show the text as written.
@@ -417,7 +418,7 @@ function listLines(value: string): string[] {
 }
 
 function section(heading: string, lines: readonly string[]): string[] {
-  return lines.length > 0 ? ['', heading, ...lines] : []
+  return lines.length > 0 ? ['', `### ${heading}`, ...lines] : []
 }
 
 function formatTime(record: Record<string, unknown>): string {
@@ -425,7 +426,7 @@ function formatTime(record: Record<string, unknown>): string {
   return typeof at === 'number' && Number.isFinite(at) ? new Date(at).toLocaleString() : ''
 }
 
-/** Dialog text for one observation or session summary; null when the Worker has none. */
+/** Dialog Markdown for one observation or session summary; null when the Worker has none. */
 export function describeDetail(
   kind: RecentItemKind,
   id: number,
@@ -436,15 +437,18 @@ export function describeDetail(
   }
   const meta = [kind === 'observation' ? field(record, 'type') : 'session', formatTime(record)]
   if (kind === 'observation') {
+    const subtitle = field(record, 'subtitle')
     return {
       title: `#${id} ${field(record, 'title')}`.trim(),
       message: [
-        field(record, 'subtitle'),
+        ...(subtitle ? [`*${subtitle}*`] : []),
         ...section('Narrative', listLines(field(record, 'narrative'))),
         ...section('Facts', listLines(field(record, 'facts'))),
-        ...section('Files modified', listLines(field(record, 'files_modified'))),
+        ...section('Files modified', listLines(field(record, 'files_modified'), true)),
         '',
-        [...meta, `get_observations([${id}])`].filter(Boolean).join(' · '),
+        '---',
+        '',
+        [...meta, `\`get_observations([${id}])\``].filter(Boolean).join(' · '),
       ]
         .join('\n')
         .trim(),
@@ -458,6 +462,8 @@ export function describeDetail(
       ...section('Completed', listLines(field(record, 'completed'))),
       ...section('Next steps', listLines(field(record, 'next_steps'))),
       ...section('Notes', listLines(field(record, 'notes'))),
+      '',
+      '---',
       '',
       [...meta, `#${id}`].filter(Boolean).join(' · '),
     ]

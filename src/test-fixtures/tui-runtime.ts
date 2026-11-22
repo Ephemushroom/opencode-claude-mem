@@ -69,11 +69,14 @@ const worker = Bun.serve({
         id: 2,
         type: 'feature',
         title: 'Latest observation fixture',
+        subtitle: 'With `inline code` and *emphasis*',
+        narrative: 'Checks **Markdown** rendering inside `renderDetail`.',
         facts: JSON.stringify([
           'Detail dialog fixture fact',
           ...Array.from({ length: 60 }, (_, index) => `Long detail fixture line ${index + 1}`),
           'Detail scroll end marker',
         ]),
+        files_modified: JSON.stringify(['src/cli.ts']),
         created_at_epoch: at,
       })
     }
